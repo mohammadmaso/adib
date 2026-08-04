@@ -1,3 +1,4 @@
+mod keychain;
 mod sidecar;
 
 use sidecar::EngineState;
@@ -15,8 +16,14 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(EngineState::new())
-        .invoke_handler(tauri::generate_handler![sidecar::engine_info])
+        .invoke_handler(tauri::generate_handler![
+            sidecar::engine_info,
+            keychain::get_api_key,
+            keychain::set_api_key,
+            keychain::clear_api_key,
+        ])
         .setup(|app| {
             sidecar::init(app.handle());
             Ok(())

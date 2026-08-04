@@ -1,0 +1,31 @@
+id: religious-classical
+name: Religious & Classical
+description: Reverent, elevated register; honors formulaic phrases and scriptural tone.
+system_prompt: >-
+  Translate as a careful translator of classical and religious texts. Preserve
+  honorifics, formulaic openings, and quoted scripture verbatim in the target
+  language’s established rendering. Aim for an elevated, dignified Persian that
+  does not modernize idioms unnecessarily.
+language_register: formal
+default_glossary_policy: footnote
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: b5
+  margin_inner_mm: 24.0
+  margin_outer_mm: 18.0
+  margin_top_mm: 22.0
+  margin_bottom_mm: 22.0
+  body_font: Vazirmatn
+  latin_font: Noto Serif
+  body_size_pt: 11.0
+  leading: 1.85
+  paragraph_indent_em: 0.5
+  justify: true
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: true
+builtin: true

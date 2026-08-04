@@ -1,0 +1,350 @@
+import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { CheckCircle2, FolderOpen, Loader, Sparkles } from "lucide-react";
+import { toast } from "sonner";
+import { api, type components } from "@/lib/api-client";
+import { getApiKey } from "@/lib/keychain";
+import { useProjectEvents } from "@/hooks/use-project-events";
+import { SegmentRow } from "@/components/gate3/segment-row";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+
+type SegmentStatus = components["schemas"]["SegmentStatus"];
+
+const FILTERS: { label: string; value: SegmentStatus | "all" }[] = [
+  { label: "All", value: "all" },
+  { label: "Flagged", value: "flagged" },
+  { label: "Pending", value: "pending" },
+  { label: "Failed", value: "failed" },
+  { label: "Approved", value: "approved" },
+];
+
+export default function Gate3Route() {
+  const { projectId } = useParams();
+  const queryClient = useQueryClient();
+  const translateTriggered = useRef(false);
+  const [filter, setFilter] = useState<SegmentStatus | "all">("all");
+  const [retranslating, setRetranslating] = useState<Set<string>>(new Set());
+  const [exportFormats, setExportFormats] = useState({ pdf: true, epub: true });
+  const [outputs, setOutputs] = useState<Record<string, string> | null>(null);
+
+  const projectQuery = useQuery({
+    queryKey: ["project", projectId],
+    enabled: !!projectId,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/projects/{project_id}", {
+        params: { path: { project_id: projectId! } },
+      });
+      if (error) throw error;
+      return data;
+    },
+    refetchInterval: (query) => {
+      const s = query.state.data?.stage;
+      return s === "translating" || s === "exporting" ? 1500 : false;
+    },
+  });
+
+  const stage = projectQuery.data?.stage;
+  const isTranslating = stage === "translating";
+  const isExporting = stage === "exporting";
+  const hasSegments = stage != null && stage !== "translating";
+
+  const event = useProjectEvents(projectId, isTranslating || isExporting || retranslating.size > 0);
+
+  const countsQuery = useQuery({
+    queryKey: ["segment-counts", projectId],
+    enabled: !!projectId && hasSegments,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/projects/{project_id}/segments/counts", {
+        params: { path: { project_id: projectId! } },
+      });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const segmentsQuery = useQuery({
+    queryKey: ["segments", projectId, filter],
+    enabled: !!projectId && hasSegments,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/projects/{project_id}/segments", {
+        params: {
+          path: { project_id: projectId! },
+          query: { status: filter === "all" ? undefined : filter, limit: 300, offset: 0 },
+        },
+      });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const translateMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("no project");
+      const api_key = (await getApiKey().catch(() => null)) ?? null;
+      const { error } = await api.POST("/projects/{project_id}/translate", {
+        params: { path: { project_id: projectId } },
+        body: { api_key },
+      });
+      if (error) throw error;
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Failed to start translation");
+    },
+  });
+
+  useEffect(() => {
+    if (isTranslating && !translateTriggered.current) {
+      translateTriggered.current = true;
+      translateMutation.mutate();
+    }
+    if (!isTranslating) translateTriggered.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTranslating]);
+
+  useEffect(() => {
+    if (!event) return;
+    if (event.stage === "review" || event.stage === "translate_failed" || event.stage === "failed") {
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["segments", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
+      if (event.stage === "translate_failed") toast.error("Translation run failed");
+    }
+    if (event.stage === "translating" && typeof event.segment_id === "string") {
+      queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
+    }
+    if (event.stage === "segment_retranslated" && typeof event.segment_id === "string") {
+      setRetranslating((prev) => {
+        const next = new Set(prev);
+        next.delete(event.segment_id as string);
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["segments", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
+    }
+    if (event.stage === "segment_retranslate_failed" && typeof event.segment_id === "string") {
+      setRetranslating((prev) => {
+        const next = new Set(prev);
+        next.delete(event.segment_id as string);
+        return next;
+      });
+      toast.error("Retranslation failed");
+    }
+    if (event.stage === "done") {
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      if (event.outputs && typeof event.outputs === "object") {
+        setOutputs(event.outputs as Record<string, string>);
+      }
+      toast.success("Export complete");
+    }
+  }, [event, projectId, queryClient]);
+
+  const saveMutation = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: components["schemas"]["SegmentUpdate"] }) => {
+      const { error } = await api.PATCH("/projects/{project_id}/segments/{segment_id}", {
+        params: { path: { project_id: projectId!, segment_id: id } },
+        body: patch,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["segments", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Failed to save segment");
+    },
+  });
+
+  const retranslateMutation = useMutation({
+    mutationFn: async (segmentId: string) => {
+      if (!projectId) throw new Error("no project");
+      const api_key = (await getApiKey().catch(() => null)) ?? null;
+      const { error } = await api.POST("/projects/{project_id}/segments/{segment_id}/retranslate", {
+        params: { path: { project_id: projectId, segment_id: segmentId } },
+        body: { api_key },
+      });
+      if (error) throw error;
+    },
+    onMutate: (segmentId) => {
+      setRetranslating((prev) => new Set(prev).add(segmentId));
+    },
+    onError: (error: unknown, segmentId) => {
+      setRetranslating((prev) => {
+        const next = new Set(prev);
+        next.delete(segmentId);
+        return next;
+      });
+      toast.error(error instanceof Error ? error.message : "Failed to retranslate");
+    },
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("no project");
+      const formats = Object.entries(exportFormats)
+        .filter(([, on]) => on)
+        .map(([f]) => f);
+      const { error } = await api.POST("/projects/{project_id}/export", {
+        params: { path: { project_id: projectId } },
+        body: { formats },
+      });
+      if (error) throw error;
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Failed to start export");
+    },
+  });
+
+  if (projectQuery.isLoading) {
+    return (
+      <div className="grid h-full place-items-center">
+        <Loader className="size-6 animate-spin text-muted-foreground" aria-hidden />
+      </div>
+    );
+  }
+
+  if (isTranslating) {
+    const percent = typeof event?.percent === "number" ? event.percent : 0;
+    return (
+      <div className="grid h-full place-items-center p-8">
+        <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
+          <Sparkles className="size-8 animate-pulse text-muted-foreground" aria-hidden />
+          <p className="font-medium">Translating…</p>
+          <Progress value={percent} className="w-full" />
+          <p className="text-sm text-muted-foreground">{percent}%</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!hasSegments) {
+    return (
+      <div className="grid h-full place-items-center">
+        <Loader className="size-6 animate-spin text-muted-foreground" aria-hidden />
+      </div>
+    );
+  }
+
+  const segments = segmentsQuery.data ?? [];
+  const counts = countsQuery.data ?? {};
+  const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b border-border px-8 py-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Review &amp; Export</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">{totalCount} segments</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {FILTERS.map((f) => (
+            <Button
+              key={f.value}
+              variant={filter === f.value ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setFilter(f.value)}
+            >
+              {f.label}
+              {f.value !== "all" && counts[f.value] != null && (
+                <Badge variant="outline" className="ml-1 text-[10px]">
+                  {counts[f.value]}
+                </Badge>
+              )}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {segmentsQuery.isLoading && (
+          <div className="grid h-32 place-items-center">
+            <Loader className="size-5 animate-spin text-muted-foreground" aria-hidden />
+          </div>
+        )}
+        {segments.length === 0 && !segmentsQuery.isLoading && (
+          <p className="p-8 text-center text-sm text-muted-foreground">No segments match this filter.</p>
+        )}
+        {segments.map((segment) => (
+          <SegmentRow
+            key={segment.id}
+            segment={segment}
+            retranslating={retranslating.has(segment.id)}
+            onSave={(target_text) => saveMutation.mutate({ id: segment.id, patch: { target_text } })}
+            onToggleLock={() =>
+              saveMutation.mutate({ id: segment.id, patch: { locked: !segment.locked } })
+            }
+            onApprove={() =>
+              saveMutation.mutate({
+                id: segment.id,
+                patch: { status: segment.status === "approved" ? "translated" : "approved" },
+              })
+            }
+            onRetranslate={() => retranslateMutation.mutate(segment.id)}
+          />
+        ))}
+      </div>
+
+      <div className="border-t border-border px-8 py-4">
+        {isExporting ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader className="size-4 animate-spin" aria-hidden />
+            Exporting…
+          </div>
+        ) : (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <label className="flex items-center gap-1.5 text-sm">
+                <Checkbox
+                  checked={exportFormats.pdf}
+                  onCheckedChange={(checked) => setExportFormats((f) => ({ ...f, pdf: checked }))}
+                />
+                <Label>PDF</Label>
+              </label>
+              <label className="flex items-center gap-1.5 text-sm">
+                <Checkbox
+                  checked={exportFormats.epub}
+                  onCheckedChange={(checked) => setExportFormats((f) => ({ ...f, epub: checked }))}
+                />
+                <Label>EPUB</Label>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {outputs &&
+                Object.entries(outputs).map(([format, path]) => (
+                  <Button key={format} variant="outline" size="sm" onClick={() => revealItemInDir(path)}>
+                    <FolderOpen className="size-3.5" />
+                    Show {format.toUpperCase()}
+                  </Button>
+                ))}
+              {stage === "done" && !outputs && (
+                <Badge variant="outline" className="gap-1">
+                  <CheckCircle2 className="size-3.5" />
+                  Exported
+                </Badge>
+              )}
+              <Button
+                disabled={
+                  (!exportFormats.pdf && !exportFormats.epub) || exportMutation.isPending
+                }
+                onClick={() => {
+                  setOutputs(null);
+                  exportMutation.mutate();
+                }}
+              >
+                {exportMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
+                Export
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,29 @@
+id: general
+name: General
+description: Balanced neutral register for mixed or unknown content.
+system_prompt: >-
+  Translate clearly and naturally, matching the source’s register. Prefer the
+  glossary terms when they apply, keep numbers and proper nouns accurate, and
+  keep the prose faithful but idiomatic.
+language_register: neutral
+default_glossary_policy: translate
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: a5
+  margin_inner_mm: 22.0
+  margin_outer_mm: 16.0
+  margin_top_mm: 20.0
+  margin_bottom_mm: 20.0
+  body_font: Vazirmatn
+  latin_font: Noto Serif
+  body_size_pt: 11.0
+  leading: 1.75
+  justify: true
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: true
+builtin: true

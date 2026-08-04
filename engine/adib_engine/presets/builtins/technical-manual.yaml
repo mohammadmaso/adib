@@ -1,0 +1,35 @@
+id: technical-manual
+name: Technical Manual
+description: Neutral, precise register for documentation. Keeps APIs and commands verbatim.
+system_prompt: >-
+  Translate as a technical writer would. Preserve code identifiers, command
+  names, file paths, and environment variables exactly. Use the imperative and
+  keep procedures stepwise. Never invent terminology where a standard Persian
+  equivalent exists in the glossary.
+language_register: technical
+default_glossary_policy: keep
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: a4
+  margin_inner_mm: 24.0
+  margin_outer_mm: 18.0
+  margin_top_mm: 20.0
+  margin_bottom_mm: 20.0
+  body_font: Vazirmatn
+  mono_font: JetBrains Mono
+  latin_font: Noto Serif
+  body_size_pt: 10.5
+  leading: 1.7
+  paragraph_spacing_em: 0.4
+  justify: true
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: true
+qa_rules:
+  - numbers-unchanged
+  - placeholder-integrity
+builtin: true

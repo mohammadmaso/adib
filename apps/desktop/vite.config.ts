@@ -13,6 +13,7 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@adib/schema": path.resolve(__dirname, "../../packages/schema/src/api.ts"),
     },
   },
 

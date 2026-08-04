@@ -1,0 +1,31 @@
+id: literary-fiction
+name: Literary Fiction
+description: Literary register, meandering sentences kept readable in RTL, minimal jargon.
+system_prompt: >-
+  Translate as a literary translator would. Preserve voice, irony, sentence
+  rhythm, and cultural references with a footnote when they cannot be carried
+  over. Prefer natural Persian over word-for-word fidelity; keep dialogue
+  lively and consistent per character.
+language_register: literary
+default_glossary_policy: translate_paren
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: trade
+  margin_inner_mm: 22.0
+  margin_outer_mm: 16.0
+  margin_top_mm: 20.0
+  margin_bottom_mm: 20.0
+  body_font: Vazirmatn
+  latin_font: Noto Serif
+  body_size_pt: 11.0
+  leading: 1.75
+  paragraph_indent_em: 0.5
+  justify: true
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: false
+builtin: true

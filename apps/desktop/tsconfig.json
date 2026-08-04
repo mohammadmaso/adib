@@ -22,9 +22,10 @@
 
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@adib/schema": ["../../packages/schema/src/api.ts"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "../../packages/schema/src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

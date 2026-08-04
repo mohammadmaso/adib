@@ -1,0 +1,32 @@
+id: academic-paper
+name: Academic Paper
+description: Formal academic register, serif body, footnotes for foreign terms.
+system_prompt: >-
+  Translate as a scholarly translator would. Preserve citation forms, always use
+  the established Persian terminology for the field, keep every footnote’s
+  content identical in meaning, and do not soften technical claims.
+language_register: formal
+default_glossary_policy: footnote
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: a4
+  margin_inner_mm: 25.0
+  margin_outer_mm: 20.0
+  margin_top_mm: 22.0
+  margin_bottom_mm: 22.0
+  body_font: Vazirmatn
+  latin_font: Noto Serif
+  body_size_pt: 11.0
+  leading: 1.85
+  justify: true
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: true
+qa_rules:
+  - numbers-unchanged
+  - glossary-consistency
+builtin: true

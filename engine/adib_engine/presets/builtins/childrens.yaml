@@ -1,0 +1,30 @@
+id: childrens
+name: Children's Books
+description: Warm, simple register for young readers; short sentences, playful tone.
+system_prompt: >-
+  Translate for children of the book’s age range. Use simple, warm Persian,
+  short sentences, and keep names and onomatopoeia lively. Add a gentle footnote
+  for any cultural term that needs explaining rather than letting it confuse.
+language_register: colloquial
+default_glossary_policy: translate
+footnotes:
+  first_use_per_chapter: true
+  build_appendix: true
+  link_to_appendix: true
+typography:
+  page_size: a5
+  margin_inner_mm: 22.0
+  margin_outer_mm: 18.0
+  margin_top_mm: 22.0
+  margin_bottom_mm: 22.0
+  body_font: Vazirmatn
+  latin_font: Noto Serif
+  body_size_pt: 12.0
+  leading: 1.7
+  paragraph_spacing_em: 0.8
+  justify: false
+  hyphenate: false
+  digit_style: persian
+  show_page_numbers: true
+  show_running_heads: false
+builtin: true

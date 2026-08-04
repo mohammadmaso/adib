@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+dist-ssr/
+*.local
+
+# Rust / Tauri
+target/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/typst*
+apps/desktop/src-tauri/gen/
+
+# Generated API types
+packages/schema/src/api.ts
+packages/schema/openapi.json
+
+# App data
+*.adib
+*.adib-shm
+*.adib-wal
+scratch/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
