@@ -17,11 +17,13 @@ from pydantic import BaseModel
 
 from adib_engine.agents.translate import translate_book
 from adib_engine.api.deps import project_store
-from adib_engine.api.progress import hub
+from adib_engine.api.progress import hub, pause_registry
 from adib_engine.models.project import ProjectStage
 from adib_engine.models.segment import Segment, SegmentStatus, SegmentUpdate
 from adib_engine.segmentation import apply_translations
+from adib_engine.settings import get_settings
 from adib_engine.store.project_store import SOURCE, TARGET, ProjectStore, open_project
+from adib_engine.store.provider_config import load_provider
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +42,12 @@ def start_translation(
     store: ProjectStore = Depends(project_store),
 ) -> dict[str, str]:
     meta = store.meta()
-    allowed = (ProjectStage.TRANSLATING, ProjectStage.REVIEW, ProjectStage.FAILED)
+    allowed = (
+        ProjectStage.TRANSLATING,
+        ProjectStage.PAUSED,
+        ProjectStage.REVIEW,
+        ProjectStage.FAILED,
+    )
     if meta.stage not in allowed:
         raise HTTPException(
             status_code=409, detail=f"cannot translate from stage '{meta.stage.value}'"
@@ -49,9 +56,25 @@ def start_translation(
     if preset is None:
         raise HTTPException(status_code=409, detail="no approved preset — finish Gate 2 first")
 
+    pause_registry.clear(project_id)
     pending = store.pending_segments()
     background_tasks.add_task(_run_translate, project_id, store.path, body.api_key)
     return {"status": "started", "queued": str(len(pending))}
+
+
+@router.post("/{project_id}/translate/pause", status_code=202)
+def pause_translation(
+    project_id: str, store: ProjectStore = Depends(project_store)
+) -> dict[str, str]:
+    """Ask an in-flight translation run to stop after its current segments.
+
+    A no-op (but not an error) if nothing is running — the flag is simply
+    cleared the next time a run starts.
+    """
+    if store.meta().stage != ProjectStage.TRANSLATING:
+        raise HTTPException(status_code=409, detail="no translation run in progress")
+    pause_registry.request(project_id)
+    return {"status": "pausing"}
 
 
 def _run_translate(project_id: str, path: Path, api_key: str | None) -> None:
@@ -60,7 +83,7 @@ def _run_translate(project_id: str, path: Path, api_key: str | None) -> None:
     with open_project(path) as store:
         hub.publish(project_id, {"stage": "translating", "percent": 0})
         try:
-            provider = store.provider()
+            provider = load_provider(get_settings())
             preset = store.preset()
             analysis = store.analysis()
             style_guide = analysis.style_guide if analysis else None
@@ -79,24 +102,42 @@ def _run_translate(project_id: str, path: Path, api_key: str | None) -> None:
                 translate_book(
                     store, provider, preset, api_key=api_key, style_guide=style_guide,
                     progress=on_segment,
+                    should_pause=lambda: pause_registry.should_pause(project_id),
                 )
             )
-            store.set_stage(ProjectStage.REVIEW)
-            hub.publish(
-                project_id,
-                {
-                    "stage": "review",
-                    "percent": 100,
-                    "segments": result["segments"],
-                    "failed": len(result["failed"]),
-                    "cost_usd": result["cost_usd"],
-                },
-            )
-        except Exception:
+            pause_registry.clear(project_id)
+            if result["paused"]:
+                store.set_stage(ProjectStage.PAUSED)
+                hub.publish(
+                    project_id,
+                    {
+                        "stage": "paused",
+                        "percent": int(100 * result["segments"] / max(total_pending, 1)),
+                        "segments": result["segments"],
+                    },
+                )
+            else:
+                store.set_stage(ProjectStage.REVIEW)
+                hub.publish(
+                    project_id,
+                    {
+                        "stage": "review",
+                        "percent": 100,
+                        "segments": result["segments"],
+                        "failed": len(result["failed"]),
+                        "cost_usd": result["cost_usd"],
+                    },
+                )
+        except Exception as exc:
+            pause_registry.clear(project_id)
             log.exception("translation failed for project %s", project_id)
-            hub.publish(
-                project_id, {"stage": "translate_failed", "error": "translation run failed"}
+            reason = str(exc) or "translation run failed"
+            store.update_meta(
+                stage=ProjectStage.FAILED,
+                failed_stage=ProjectStage.TRANSLATING,
+                failed_reason=reason,
             )
+            hub.publish(project_id, {"stage": "failed", "error": reason})
 
 
 @router.get("/{project_id}/segments", response_model=list[Segment])
@@ -151,7 +192,7 @@ def _run_retranslate(project_id: str, path: Path, segment_id: str, api_key: str 
 
     with open_project(path) as store:
         try:
-            provider = store.provider()
+            provider = load_provider(get_settings())
             preset = store.preset()
             analysis = store.analysis()
             style_guide = analysis.style_guide if analysis else None
@@ -246,7 +287,12 @@ def _run_export(project_id: str, path: Path, formats: list[str]) -> None:
 
             store.set_stage(ProjectStage.DONE)
             hub.publish(project_id, {"stage": "done", "percent": 100, "outputs": outputs})
-        except Exception:
+        except Exception as exc:
             log.exception("export failed for project %s", project_id)
-            store.set_stage(ProjectStage.FAILED)
-            hub.publish(project_id, {"stage": "failed", "error": "export failed unexpectedly"})
+            reason = str(exc) or "export failed unexpectedly"
+            store.update_meta(
+                stage=ProjectStage.FAILED,
+                failed_stage=ProjectStage.EXPORTING,
+                failed_reason=reason,
+            )
+            hub.publish(project_id, {"stage": "failed", "error": reason})

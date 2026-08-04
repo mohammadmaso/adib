@@ -4,38 +4,21 @@ import { Eye, EyeOff, KeyRound, Loader } from "lucide-react";
 import { toast } from "sonner";
 import { api, type components } from "@/lib/api-client";
 import { clearApiKey, getApiKey, setApiKey } from "@/lib/keychain";
-import { projectIdFromPath } from "@/lib/project";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 
 type ProviderSettings = components["schemas"]["ProviderSettings"];
-
-const DEFAULT_PROVIDER: ProviderSettings = {
-  base_url: "https://api.openai.com/v1",
-  model: "gpt-4o-mini",
-  temperature: 0.3,
-  concurrency: 4,
-  max_retries: 5,
-  request_timeout_s: 180,
-  price_per_mtok_in: 0,
-  price_per_mtok_out: 0,
-};
 
 export default function SettingsRoute() {
   return (
     <div className="mx-auto max-w-xl space-y-8 p-8">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Provider credentials and per-project defaults.</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Provider credentials and defaults, shared across every project.
+        </p>
       </div>
 
       <ApiKeyCard />
@@ -139,31 +122,12 @@ function ApiKeyCard() {
 
 function ProviderCard() {
   const queryClient = useQueryClient();
-  const [projectId, setProjectId] = useState<string | null>(null);
   const [provider, setProvider] = useState<ProviderSettings | null>(null);
 
-  const projectsQuery = useQuery({
-    queryKey: ["projects"],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/projects");
-      if (error) throw error;
-      return data;
-    },
-  });
-
-  useEffect(() => {
-    if (!projectId && projectsQuery.data && projectsQuery.data.length > 0) {
-      setProjectId(projectIdFromPath(projectsQuery.data[0].path));
-    }
-  }, [projectId, projectsQuery.data]);
-
   const providerQuery = useQuery({
-    queryKey: ["provider", projectId],
-    enabled: !!projectId,
+    queryKey: ["provider"],
     queryFn: async () => {
-      const { data, error } = await api.GET("/projects/{project_id}/provider", {
-        params: { path: { project_id: projectId! } },
-      });
+      const { data, error } = await api.GET("/provider");
       if (error) throw error;
       return data;
     },
@@ -175,17 +139,14 @@ function ProviderCard() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      if (!projectId || !provider) throw new Error("nothing to save");
-      const { data, error } = await api.PUT("/projects/{project_id}/provider", {
-        params: { path: { project_id: projectId } },
-        body: provider,
-      });
+      if (!provider) throw new Error("nothing to save");
+      const { data, error } = await api.PUT("/provider", { body: provider });
       if (error) throw error;
       return data;
     },
     onSuccess: (data) => {
       setProvider(data);
-      queryClient.invalidateQueries({ queryKey: ["provider", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["provider"] });
       toast.success("Provider settings saved");
     },
     onError: (error: unknown) => {
@@ -194,10 +155,8 @@ function ProviderCard() {
   });
 
   function set<K extends keyof ProviderSettings>(key: K, value: ProviderSettings[K]) {
-    setProvider((p) => ({ ...(p ?? DEFAULT_PROVIDER), [key]: value }));
+    setProvider((p) => (p ? { ...p, [key]: value } : p));
   }
-
-  const projects = projectsQuery.data ?? [];
 
   return (
     <Card>
@@ -205,123 +164,104 @@ function ProviderCard() {
         <CardTitle>Provider</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {projects.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No projects yet — provider settings are configured per project once one exists.
-          </p>
-        ) : (
+        <p className="text-sm text-muted-foreground">
+          Applies to every project — analysis, glossary, translation, and retranslation calls all
+          use this endpoint and model.
+        </p>
+
+        {providerQuery.isLoading && (
+          <div className="grid h-24 place-items-center">
+            <Loader className="size-5 animate-spin text-muted-foreground" aria-hidden />
+          </div>
+        )}
+
+        {provider && (
           <>
-            <div className="space-y-1.5">
-              <Label>Project</Label>
-              <Select value={projectId ?? undefined} onValueChange={setProjectId}>
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((p) => (
-                    <SelectItem key={p.path} value={projectIdFromPath(p.path)}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {providerQuery.isLoading && (
-              <div className="grid h-24 place-items-center">
-                <Loader className="size-5 animate-spin text-muted-foreground" aria-hidden />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2 space-y-1.5">
+                <Label>Base URL</Label>
+                <Input value={provider.base_url} onChange={(e) => set("base_url", e.target.value)} />
               </div>
-            )}
-
-            {provider && (
-              <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="col-span-2 space-y-1.5">
-                    <Label>Base URL</Label>
-                    <Input value={provider.base_url} onChange={(e) => set("base_url", e.target.value)} />
-                  </div>
-                  <div className="col-span-2 space-y-1.5">
-                    <Label>Model</Label>
-                    <Input value={provider.model} onChange={(e) => set("model", e.target.value)} />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Temperature</Label>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      min={0}
-                      max={2}
-                      value={provider.temperature}
-                      onChange={(e) => set("temperature", Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Concurrency</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={provider.concurrency}
-                      onChange={(e) => set("concurrency", Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Max retries</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={provider.max_retries}
-                      onChange={(e) => set("max_retries", Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Request timeout (s)</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={provider.request_timeout_s}
-                      onChange={(e) => set("request_timeout_s", Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Spend cap (USD)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={provider.max_spend_usd ?? ""}
-                      placeholder="No cap"
-                      onChange={(e) =>
-                        set("max_spend_usd", e.target.value === "" ? null : Number(e.target.value))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Price / Mtok in (USD)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={provider.price_per_mtok_in}
-                      onChange={(e) => set("price_per_mtok_in", Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Price / Mtok out (USD)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={provider.price_per_mtok_out}
-                      onChange={(e) => set("price_per_mtok_out", Number(e.target.value))}
-                    />
-                  </div>
-                </div>
-                <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
-                  {saveMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
-                  Save provider settings
-                </Button>
-              </>
-            )}
+              <div className="col-span-2 space-y-1.5">
+                <Label>Model</Label>
+                <Input value={provider.model} onChange={(e) => set("model", e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Temperature</Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  min={0}
+                  max={2}
+                  value={provider.temperature}
+                  onChange={(e) => set("temperature", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Concurrency</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={provider.concurrency}
+                  onChange={(e) => set("concurrency", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Max retries</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={provider.max_retries}
+                  onChange={(e) => set("max_retries", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Request timeout (s)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={provider.request_timeout_s}
+                  onChange={(e) => set("request_timeout_s", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Spend cap (USD)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={provider.max_spend_usd ?? ""}
+                  placeholder="No cap"
+                  onChange={(e) =>
+                    set("max_spend_usd", e.target.value === "" ? null : Number(e.target.value))
+                  }
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Price / Mtok in (USD)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={provider.price_per_mtok_in}
+                  onChange={(e) => set("price_per_mtok_in", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Price / Mtok out (USD)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={provider.price_per_mtok_out}
+                  onChange={(e) => set("price_per_mtok_out", Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
+              {saveMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
+              Save provider settings
+            </Button>
           </>
         )}
       </CardContent>

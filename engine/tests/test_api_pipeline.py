@@ -464,6 +464,18 @@ async def test_translate_runs_and_reaches_review(
     assert translated and all(t.startswith("[fa]") for t in translated)
 
 
+async def test_pause_translation_rejected_when_not_translating(
+    client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate
+):
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+    await client.post(f"/projects/{project_id}/translate", json={})
+    await _wait_for_stage(client, project_id, "review", timeout=10.0)
+
+    resp = await client.post(f"/projects/{project_id}/translate/pause")
+    assert resp.status_code == 409
+
+
 async def test_segment_edit_and_lock(
     client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate
 ):

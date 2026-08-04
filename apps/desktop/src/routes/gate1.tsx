@@ -115,6 +115,20 @@ export default function Gate1Route() {
     },
   });
 
+  const retryIngestMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("no project");
+      const { error } = await api.POST("/projects/{project_id}/ingest", {
+        params: { path: { project_id: projectId }, query: {} },
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Failed to retry ingest");
+    },
+  });
+
   const approveMutation = useMutation({
     mutationFn: async () => {
       if (!projectId) throw new Error("no project");
@@ -168,15 +182,28 @@ export default function Gate1Route() {
   }
 
   if (stage === "failed") {
+    const reason =
+      projectQuery.data?.failed_reason ??
+      (event?.stage === "failed" && typeof event.error === "string" ? event.error : null) ??
+      "The source file could not be parsed.";
     return (
       <div className="p-8">
         <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-          <div>
-            <p className="font-medium text-destructive">Ingest failed</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {(event?.stage === "failed" && event.error) || "The source file could not be parsed."}
-            </p>
+          <div className="flex-1 space-y-3">
+            <div>
+              <p className="font-medium text-destructive">Ingest failed</p>
+              <p className="mt-1 text-sm text-muted-foreground">{reason}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={retryIngestMutation.isPending}
+              onClick={() => retryIngestMutation.mutate()}
+            >
+              {retryIngestMutation.isPending && <Loader className="size-3.5 animate-spin" aria-hidden />}
+              Retry ingest
+            </Button>
           </div>
         </div>
       </div>

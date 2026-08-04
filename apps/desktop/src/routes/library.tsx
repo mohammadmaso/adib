@@ -114,7 +114,7 @@ export default function LibraryRoute() {
                 <Card
                   key={project.path}
                   className="cursor-pointer transition-shadow hover:shadow-md"
-                  onClick={() => navigate(routeForStage(project.stage, projectId))}
+                  onClick={() => navigate(routeForStage(project.stage, projectId, project.failed_stage))}
                 >
                   <CardHeader>
                     <CardTitle className="truncate" title={project.name}>

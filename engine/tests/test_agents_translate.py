@@ -200,7 +200,14 @@ def test_translate_book_translates_every_pending_segment_and_commits(store):
 
 def test_translate_book_is_a_noop_when_nothing_pending(store):
     result = asyncio.run(translate_book(store, PROVIDER, _preset(), model=FunctionModel(_upper_fn)))
-    assert result == {"queued": 0, "segments": 0, "tokens": 0, "cost_usd": 0.0, "failed": []}
+    assert result == {
+        "queued": 0,
+        "segments": 0,
+        "tokens": 0,
+        "cost_usd": 0.0,
+        "failed": [],
+        "paused": False,
+    }
 
 
 def test_translate_book_resumes_after_a_simulated_crash(store):
@@ -245,6 +252,33 @@ def test_translate_book_skips_locked_segments(store):
     assert locked_seg.target_text == "Human edit."  # untouched by the run
 
 
+def test_translate_book_stops_early_when_paused(store):
+    """`should_pause` is polled between segments, not mid-flight: a pause
+    request lets whatever's in progress finish, then stops picking up more,
+    leaving the rest pending for a later resumed run."""
+    store.sync_segments(simple_book())
+    all_ids = [s.id for s in store.segments()]
+    assert len(all_ids) > 2
+
+    completed: list[str] = []
+
+    result = asyncio.run(
+        translate_book(
+            store,
+            PROVIDER,
+            _preset(),
+            model=FunctionModel(_upper_fn),
+            concurrency=1,
+            progress=completed.append,
+            should_pause=lambda: len(completed) >= 1,
+        )
+    )
+
+    assert result["paused"] is True
+    assert 0 < result["segments"] < len(all_ids)
+    assert store.pending_segments()  # something left for the next run
+
+
 def test_translate_book_records_failure_without_aborting_the_batch(store):
     store.sync_segments(simple_book())
     all_ids = [s.id for s in store.segments()]
@@ -266,3 +300,31 @@ def test_translate_book_records_failure_without_aborting_the_batch(store):
     assert failed_seg.error == "simulated 500"
     # Everything else in the batch still completed.
     assert result["segments"] == len(all_ids) - 1
+
+
+def test_translate_book_flags_segments_that_fail_qa(store):
+    """A segment the QA pass objects to lands as FLAGGED, with the reason
+    recorded on it, rather than a plain TRANSLATED that looks fine at a glance.
+
+    Uses a stray placeholder sentinel in the model's output (rather than an
+    empty response) to trip the QA pass without also tripping pydantic-ai's
+    own output validation, which independently rejects empty content."""
+    from adib_engine.agents.placeholders import PLACEHOLDER_CLOSE, PLACEHOLDER_OPEN
+
+    store.sync_segments(simple_book())
+    all_ids = [s.id for s in store.segments()]
+
+    def leaky_fn(messages: list[ModelMessage], info) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart(content=f"{PLACEHOLDER_OPEN}9{PLACEHOLDER_CLOSE} translated text")]
+        )
+
+    result = asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(leaky_fn), concurrency=1)
+    )
+    assert result["segments"] == len(all_ids)
+    for sid in all_ids:
+        seg = store.get_segment(sid)
+        assert seg.status == SegmentStatus.FLAGGED
+        assert seg.qa_flags
+        assert any(f["rule"] == "unresolved-placeholder" for f in seg.qa_flags)

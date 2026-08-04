@@ -11,25 +11,25 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from adib_engine.api.deps import project_store
+from adib_engine.api.deps import settings_dep
 from adib_engine.ingest.router import SUPPORTED_EXTENSIONS
 from adib_engine.models.project import ProviderSettings
-from adib_engine.store.project_store import ProjectStore
+from adib_engine.settings import RuntimeSettings
+from adib_engine.store.provider_config import load_provider, save_provider
 
-router = APIRouter(prefix="/projects", tags=["provider"])
-
-
-@router.get("/{project_id}/provider", response_model=ProviderSettings)
-def get_provider(store: ProjectStore = Depends(project_store)) -> ProviderSettings:
-    return store.provider()
+router = APIRouter(prefix="/provider", tags=["provider"])
 
 
-@router.put("/{project_id}/provider", response_model=ProviderSettings)
+@router.get("", response_model=ProviderSettings)
+def get_provider(settings: RuntimeSettings = Depends(settings_dep)) -> ProviderSettings:
+    return load_provider(settings)
+
+
+@router.put("", response_model=ProviderSettings)
 def set_provider(
-    body: ProviderSettings, store: ProjectStore = Depends(project_store)
+    body: ProviderSettings, settings: RuntimeSettings = Depends(settings_dep)
 ) -> ProviderSettings:
-    store.set_provider(body)
-    return body
+    return save_provider(settings, body)
 
 
 probe_router = APIRouter(prefix="/probe", tags=["probe"])

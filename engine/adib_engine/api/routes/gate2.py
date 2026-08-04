@@ -24,7 +24,9 @@ from adib_engine.models.glossary import GlossaryTerm, GlossaryTermUpdate, TermPo
 from adib_engine.models.preset import Preset, StyleDelta
 from adib_engine.models.project import ProjectStage
 from adib_engine.presets.library import PresetLibrary
+from adib_engine.settings import get_settings
 from adib_engine.store.project_store import SOURCE, ProjectStore, open_project
+from adib_engine.store.provider_config import load_provider
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,7 @@ def _run_analysis(project_id: str, path: Path, api_key: str | None) -> None:
         hub.publish(project_id, {"stage": "analyzing", "percent": 0})
         try:
             tree = store.load_tree(SOURCE)
-            provider = store.provider()
+            provider = load_provider(get_settings())
             result = asyncio.run(analyze_book(tree, provider, api_key=api_key))
             analysis = result.output
             store.set_analysis(analysis)
@@ -84,10 +86,15 @@ def _run_analysis(project_id: str, path: Path, api_key: str | None) -> None:
                     "suggested_preset": analysis.suggested_preset,
                 },
             )
-        except Exception:
+        except Exception as exc:
             log.exception("analysis failed for project %s", project_id)
-            store.set_stage(ProjectStage.FAILED)
-            hub.publish(project_id, {"stage": "failed", "error": "analysis failed unexpectedly"})
+            reason = str(exc) or "analysis failed unexpectedly"
+            store.update_meta(
+                stage=ProjectStage.FAILED,
+                failed_stage=ProjectStage.ANALYZING,
+                failed_reason=reason,
+            )
+            hub.publish(project_id, {"stage": "failed", "error": reason})
 
 
 def _cost(provider, prompt_tokens: int, completion_tokens: int) -> float:
@@ -146,7 +153,7 @@ def _run_glossary_build(project_id: str, path: Path, api_key: str | None) -> Non
                 hub.publish(project_id, {"stage": "glossary_ready", "percent": 100, "kept": 0})
                 return
 
-            provider = store.provider()
+            provider = load_provider(get_settings())
             preset = store.preset()
             default_policy = preset.default_glossary_policy if preset else TermPolicy.TRANSLATE
             analysis = store.analysis()

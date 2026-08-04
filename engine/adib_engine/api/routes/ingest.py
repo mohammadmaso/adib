@@ -71,9 +71,17 @@ def _run_ingest(project_id: str, path: Path, force_docling: bool) -> None:
                 },
             )
         except (UnsupportedFormatError, ScannedPdfError) as exc:
-            store.set_stage(ProjectStage.FAILED)
+            store.update_meta(
+                stage=ProjectStage.FAILED,
+                failed_stage=ProjectStage.INGESTING,
+                failed_reason=str(exc),
+            )
             hub.publish(project_id, {"stage": "failed", "error": str(exc)})
         except Exception:
             log.exception("ingest failed for project %s", project_id)
-            store.set_stage(ProjectStage.FAILED)
+            store.update_meta(
+                stage=ProjectStage.FAILED,
+                failed_stage=ProjectStage.INGESTING,
+                failed_reason="ingest failed unexpectedly",
+            )
             hub.publish(project_id, {"stage": "failed", "error": "ingest failed unexpectedly"})

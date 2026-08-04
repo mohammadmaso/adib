@@ -27,7 +27,9 @@ ENGINE_OUT="$BIN_DIR/adib-engine-$TRIPLE"
 if [[ "$MODE" == "release" ]]; then
   echo "==> freezing engine with PyInstaller"
   (cd "$ROOT/engine" && uv run pyinstaller --clean --noconfirm adib-engine.spec)
-  cp "$ROOT/engine/dist/adib-engine/adib-engine" "$ENGINE_OUT"
+  # Onefile build: the whole sidecar is the one file at dist/adib-engine (not
+  # dist/adib-engine/adib-engine, which is where a onedir build would put it).
+  cp "$ROOT/engine/dist/adib-engine" "$ENGINE_OUT"
 else
   echo "==> writing dev engine wrapper -> $ENGINE_OUT"
   # A wrapper rather than a frozen binary keeps `npm run tauri dev` on the same

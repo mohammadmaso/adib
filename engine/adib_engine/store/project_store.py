@@ -24,7 +24,6 @@ from adib_engine.models.project import (
     ProjectMeta,
     ProjectStage,
     ProjectSummary,
-    ProviderSettings,
     Run,
     RunStatus,
     UsageEvent,
@@ -110,13 +109,6 @@ class ProjectStore:
 
     def set_analysis(self, analysis: BookAnalysis) -> None:
         self.update_meta(analysis=analysis.model_dump(mode="json"))
-
-    def provider(self) -> ProviderSettings:
-        raw = self.meta().provider
-        return ProviderSettings.model_validate(raw) if raw else ProviderSettings()
-
-    def set_provider(self, provider: ProviderSettings) -> None:
-        self.update_meta(provider=provider.model_dump(mode="json"))
 
     # -- document trees -------------------------------------------------------
 
@@ -245,6 +237,7 @@ class ProjectStore:
         completion_tokens: int = 0,
         cost_usd: float = 0.0,
         status: SegmentStatus = SegmentStatus.TRANSLATED,
+        qa_flags: list[dict] | None = None,
         run_id: str | None = None,
     ) -> Segment:
         """Commit one finished translation. Called per segment, never batched.
@@ -252,6 +245,10 @@ class ProjectStore:
         Also writes the matching usage event, so the cost meter and the spend cap
         stay in agreement with what the segments actually cost — the two must
         never be able to drift apart.
+
+        `qa_flags`, when non-empty, forces the status to `FLAGGED` regardless of
+        `status` — the deterministic QA pass overrides the caller's default so a
+        segment that tripped a rule can never silently land as plain `TRANSLATED`.
         """
         with self.session() as s:
             seg = s.get(Segment, segment_id)
@@ -261,7 +258,8 @@ class ProjectStore:
                 # A human edited this while the run was in flight. Their text wins.
                 return seg
             seg.target_text = target_text
-            seg.status = status
+            seg.status = SegmentStatus.FLAGGED if qa_flags else status
+            seg.qa_flags = qa_flags or []
             seg.model_name = model_name
             seg.prompt_tokens = prompt_tokens
             seg.completion_tokens = completion_tokens
@@ -480,6 +478,7 @@ class ProjectStore:
             source_lang=meta.source_lang,
             target_lang=meta.target_lang,
             stage=meta.stage,
+            failed_stage=meta.failed_stage,
             segments_total=counts.get("total", 0),
             segments_done=done,
             cost_usd=self.total_cost(),
@@ -501,7 +500,6 @@ def create_project(
     name: str,
     source_path: str,
     target_lang: str = "fa",
-    provider: ProviderSettings | None = None,
 ) -> ProjectStore:
     """Create a new project file. Refuses to clobber an existing one."""
     path = Path(path)
@@ -517,7 +515,6 @@ def create_project(
                 name=name,
                 source_path=source_path,
                 target_lang=target_lang,
-                provider=(provider or ProviderSettings()).model_dump(mode="json"),
             )
         )
         s.commit()

@@ -112,6 +112,7 @@ export default function Gate2Route() {
       });
       if (error) throw error;
     },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
     onError: (error: unknown) => {
       toast.error(error instanceof Error ? error.message : "Failed to start analysis");
     },
@@ -202,16 +203,29 @@ export default function Gate2Route() {
     );
   }
 
-  if (stage === "failed" || (event?.stage === "failed" && !hasAnalysis)) {
+  if (stage === "failed") {
+    const reason =
+      projectQuery.data?.failed_reason ??
+      (event?.stage === "failed" && typeof event.error === "string" ? event.error : null) ??
+      "Something went wrong analyzing the book.";
     return (
       <div className="p-8">
         <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-          <div>
-            <p className="font-medium text-destructive">Analysis failed</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {(event?.stage === "failed" && event.error) || "Something went wrong analyzing the book."}
-            </p>
+          <div className="flex-1 space-y-3">
+            <div>
+              <p className="font-medium text-destructive">Analysis failed</p>
+              <p className="mt-1 text-sm text-muted-foreground">{reason}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={analyzeMutation.isPending}
+              onClick={() => analyzeMutation.mutate()}
+            >
+              {analyzeMutation.isPending && <Loader className="size-3.5 animate-spin" aria-hidden />}
+              Retry analysis
+            </Button>
           </div>
         </div>
       </div>

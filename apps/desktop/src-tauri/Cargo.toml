@@ -28,5 +28,17 @@ tokio = { version = "1.53.1", features = ["process", "io-util", "time", "sync"] 
 tauri-plugin-log = "2.9.0"
 log = "0.4.33"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
-keyring = "3"
+
+# `keyring` has no default backend — without an explicit platform feature it
+# silently falls back to a non-persistent, per-`Entry` mock store, so a
+# `set_password` call and a later `get_password` call never see the same
+# data even in the same process. Each OS needs its own real backend.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 

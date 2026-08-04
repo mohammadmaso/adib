@@ -39,7 +39,6 @@ def create(
         name=body.name,
         source_path=body.source_path,
         target_lang=body.target_lang,
-        provider=body.provider,
     ) as store:
         if body.preset_id:
             from adib_engine.presets.library import PresetLibrary

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, FolderOpen, Loader, Sparkles } from "lucide-react";
+import { CheckCircle2, CircleAlert, FolderOpen, Loader, Pause, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { api, type components } from "@/lib/api-client";
 import { getApiKey } from "@/lib/keychain";
@@ -50,9 +50,14 @@ export default function Gate3Route() {
   });
 
   const stage = projectQuery.data?.stage;
+  const failedStage = projectQuery.data?.failed_stage;
   const isTranslating = stage === "translating";
   const isExporting = stage === "exporting";
-  const hasSegments = stage != null && stage !== "translating";
+  const isTranslateFailure = stage === "failed" && failedStage === "translating";
+  //  Segments already translated in a prior run (or earlier in this run, since
+  //  translation commits per-segment) should stay visible while translation is
+  //  in progress rather than being hidden behind a full-screen spinner.
+  const hasSegments = stage != null && !isTranslateFailure;
 
   const event = useProjectEvents(projectId, isTranslating || isExporting || retranslating.size > 0);
 
@@ -93,8 +98,22 @@ export default function Gate3Route() {
       });
       if (error) throw error;
     },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
     onError: (error: unknown) => {
       toast.error(error instanceof Error ? error.message : "Failed to start translation");
+    },
+  });
+
+  const pauseMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("no project");
+      const { error } = await api.POST("/projects/{project_id}/translate/pause", {
+        params: { path: { project_id: projectId } },
+      });
+      if (error) throw error;
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Failed to pause translation");
     },
   });
 
@@ -109,11 +128,10 @@ export default function Gate3Route() {
 
   useEffect(() => {
     if (!event) return;
-    if (event.stage === "review" || event.stage === "translate_failed" || event.stage === "failed") {
+    if (event.stage === "review" || event.stage === "failed" || event.stage === "paused") {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       queryClient.invalidateQueries({ queryKey: ["segments", projectId] });
       queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
-      if (event.stage === "translate_failed") toast.error("Translation run failed");
     }
     if (event.stage === "translating" && typeof event.segment_id === "string") {
       queryClient.invalidateQueries({ queryKey: ["segment-counts", projectId] });
@@ -209,15 +227,30 @@ export default function Gate3Route() {
     );
   }
 
-  if (isTranslating) {
-    const percent = typeof event?.percent === "number" ? event.percent : 0;
+  if (isTranslateFailure) {
+    const reason =
+      projectQuery.data?.failed_reason ??
+      (event?.stage === "failed" && typeof event.error === "string" ? event.error : null) ??
+      "The translation run failed.";
     return (
-      <div className="grid h-full place-items-center p-8">
-        <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
-          <Sparkles className="size-8 animate-pulse text-muted-foreground" aria-hidden />
-          <p className="font-medium">Translating…</p>
-          <Progress value={percent} className="w-full" />
-          <p className="text-sm text-muted-foreground">{percent}%</p>
+      <div className="p-8">
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+          <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+          <div className="flex-1 space-y-3">
+            <div>
+              <p className="font-medium text-destructive">Translation failed</p>
+              <p className="mt-1 text-sm text-muted-foreground">{reason}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={translateMutation.isPending}
+              onClick={() => translateMutation.mutate()}
+            >
+              {translateMutation.isPending && <Loader className="size-3.5 animate-spin" aria-hidden />}
+              Retry translation
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -261,6 +294,46 @@ export default function Gate3Route() {
         </div>
       </div>
 
+      {isTranslating && (
+        <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-8 py-3">
+          <Sparkles className="size-4 shrink-0 animate-pulse text-muted-foreground" aria-hidden />
+          <div className="flex-1 space-y-1">
+            <p className="text-sm font-medium">
+              Translating… {typeof event?.percent === "number" ? `${event.percent}%` : ""}
+            </p>
+            <Progress value={typeof event?.percent === "number" ? event.percent : 0} />
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pauseMutation.isPending}
+            onClick={() => pauseMutation.mutate()}
+          >
+            {pauseMutation.isPending ? (
+              <Loader className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Pause className="size-3.5" aria-hidden />
+            )}
+            Pause
+          </Button>
+        </div>
+      )}
+
+      {stage === "paused" && (
+        <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-8 py-3">
+          <Pause className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <p className="flex-1 text-sm font-medium">Translation paused</p>
+          <Button
+            size="sm"
+            disabled={translateMutation.isPending}
+            onClick={() => translateMutation.mutate()}
+          >
+            {translateMutation.isPending && <Loader className="size-3.5 animate-spin" aria-hidden />}
+            Resume
+          </Button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto">
         {segmentsQuery.isLoading && (
           <div className="grid h-32 place-items-center">
@@ -290,7 +363,13 @@ export default function Gate3Route() {
         ))}
       </div>
 
-      <div className="border-t border-border px-8 py-4">
+      <div className="border-t border-border px-8 py-4 space-y-3">
+        {stage === "failed" && failedStage === "exporting" && (
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <CircleAlert className="size-3.5 shrink-0" aria-hidden />
+            {projectQuery.data?.failed_reason ?? "The last export attempt failed."}
+          </div>
+        )}
         {isExporting ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader className="size-4 animate-spin" aria-hidden />

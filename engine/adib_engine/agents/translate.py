@@ -19,17 +19,14 @@ import re
 from dataclasses import dataclass
 
 from adib_engine.agents.base import AgentResult, cost_for, result_from_run
+from adib_engine.agents.placeholders import PLACEHOLDER_CLOSE, PLACEHOLDER_OPEN
 from adib_engine.models.glossary import GlossaryTerm
 from adib_engine.models.project import ProviderSettings
 from adib_engine.models.segment import Segment, SegmentStatus
+from adib_engine.qa import run_qa
 from adib_engine.store.project_store import ProjectStore
 
 log = logging.getLogger(__name__)
-
-#: Prefix of the placeholder a protected span becomes. ≧/≨ are U+2267 and
-#: U+2268 (≧/≨) — extremely unlikely in real book text, safe against collisions.
-PLACEHOLDER_OPEN = "≧"
-PLACEHOLDER_CLOSE = "≨"
 
 
 class PlaceholderError(ValueError):
@@ -209,13 +206,20 @@ async def translate_book(
     glossary_terms: list[GlossaryTerm] | None = None,
     progress=None,
     model=None,
+    should_pause=None,
 ) -> dict[str, object]:
     """Translate every pending segment, committing each the moment it lands.
 
     Resumable: reads `store.pending_segments()`, so a second call after a crash
-    continues from exactly where the first stopped. Returns run stats for the
-    UI meter. `model` lets tests inject a deterministic `FunctionModel`/`TestModel`;
-    production uses the real bound model via `build_model`.
+    (or a paused run) continues from exactly where the last one stopped. Returns
+    run stats for the UI meter. `model` lets tests inject a deterministic
+    `FunctionModel`/`TestModel`; production uses the real bound model via
+    `build_model`.
+
+    A fixed pool of worker coroutines pulls from a shared queue (rather than
+    firing every segment at once behind a semaphore) so `should_pause` — polled
+    between segments, not mid-flight — can stop the run from picking up new
+    work while letting whatever's already in progress finish cleanly.
     """
     from pydantic_ai import Agent
 
@@ -223,7 +227,14 @@ async def translate_book(
 
     segments = store.pending_segments()
     if not segments:
-        return {"queued": 0, "segments": 0, "tokens": 0, "cost_usd": 0.0, "failed": []}
+        return {
+            "queued": 0,
+            "segments": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "failed": [],
+            "paused": False,
+        }
 
     if model is None:
         model = build_model(provider, api_key)
@@ -235,21 +246,40 @@ async def translate_book(
     )
 
     all_terms = glossary_terms or store.terms(enabled_only=True)
-    sem = asyncio.Semaphore(concurrency or provider.concurrency)
     results: list[dict[str, object]] = []
     failed: list[tuple[str, str]] = []
     total_tokens = 0
     total_cost = 0.0
+    paused = False
 
-    async def work(segment: Segment) -> None:
+    queue_index = 0
+    queue_lock = asyncio.Lock()
+
+    async def next_segment() -> Segment | None:
+        nonlocal queue_index, paused
+        async with queue_lock:
+            if should_pause is not None and should_pause():
+                paused = True
+                return None
+            if queue_index >= len(segments):
+                return None
+            segment = segments[queue_index]
+            queue_index += 1
+            return segment
+
+    async def worker() -> None:
         nonlocal total_tokens, total_cost
-        previous = _previous_for(segment, segments)
-        async with sem:
+        while True:
+            segment = await next_segment()
+            if segment is None:
+                return
+            previous = _previous_for(segment, segments)
             try:
                 ts = await translate_segment(
                     agent, segment, provider=provider, glossary_terms=all_terms, previous=previous
                 )
                 cost = cost_for(provider, ts.prompt_tokens, ts.completion_tokens)
+                flags = run_qa(segment.source_text, ts.target_text, glossary_terms=all_terms)
                 store.record_translation(
                     segment.id,
                     target_text=ts.target_text,
@@ -258,6 +288,7 @@ async def translate_book(
                     completion_tokens=ts.completion_tokens,
                     cost_usd=cost,
                     status=SegmentStatus.TRANSLATED,
+                    qa_flags=[f.model_dump(mode="json") for f in flags],
                 )
                 total_tokens += ts.total_tokens
                 total_cost += cost
@@ -268,11 +299,13 @@ async def translate_book(
                 failed.append((segment.id, str(exc)))
                 store.record_failure(segment.id, str(exc))
 
-    await asyncio.gather(*(work(seg) for seg in segments))
+    worker_count = concurrency or provider.concurrency
+    await asyncio.gather(*(worker() for _ in range(worker_count)))
     return {
         "queued": len(segments),
         "segments": len(results),
         "tokens": total_tokens,
         "cost_usd": total_cost,
         "failed": failed,
+        "paused": paused,
     }

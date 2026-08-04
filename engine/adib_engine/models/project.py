@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
-from pydantic import Field as PydField
 from sqlalchemy import Column
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import JSON, Field, SQLModel
@@ -30,6 +29,9 @@ class ProjectStage(StrEnum):
     #: Gate 2 — the user approves tone, preset, and glossary.
     STYLE_REVIEW = "style_review"
     TRANSLATING = "translating"
+    #: The user paused a translation run; segments already done are kept, the
+    #: rest stay pending until `/translate` is called again.
+    PAUSED = "paused"
     #: Gate 3 — side-by-side review before export.
     REVIEW = "review"
     EXPORTING = "exporting"
@@ -104,11 +106,19 @@ class ProjectMeta(SQLModel, table=True):
         default=ProjectStage.CREATED,
         sa_column=Column(SAEnum(ProjectStage, native_enum=False)),
     )
+    #: Which stage was running when it failed, e.g. `analyzing` or `translating`.
+    #: `stage` itself just says `failed`, which is not enough for the UI to know
+    #: which gate to send the user back to or what to offer retrying.
+    failed_stage: ProjectStage | None = Field(
+        default=None,
+        sa_column=Column(SAEnum(ProjectStage, native_enum=False), nullable=True),
+    )
+    #: Human-readable reason for the last failure, shown by the UI next to the retry action.
+    failed_reason: str | None = None
     #: Resolved preset (built-in + approved style delta), stored as JSON so the
     #: run is reproducible even if the preset library later changes.
     preset: dict | None = Field(default=None, sa_column=Column(JSON))
     analysis: dict | None = Field(default=None, sa_column=Column(JSON))
-    provider: dict | None = Field(default=None, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime))
@@ -171,6 +181,7 @@ class ProjectSummary(BaseModel):
     source_lang: str | None
     target_lang: str
     stage: ProjectStage
+    failed_stage: ProjectStage | None = None
     segments_total: int = 0
     segments_done: int = 0
     cost_usd: float = 0.0
@@ -185,7 +196,6 @@ class ProjectCreate(BaseModel):
     source_path: str
     target_lang: str = "fa"
     preset_id: str | None = None
-    provider: ProviderSettings | None = PydField(default=None)
 
 
 class ProjectCreated(BaseModel):
