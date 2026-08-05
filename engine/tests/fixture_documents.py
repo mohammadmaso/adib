@@ -156,6 +156,72 @@ def write_pdf(dst: Path) -> None:
     doc.close()
 
 
+def write_pdf_with_toc(dst: Path) -> None:
+    """A born-digital PDF whose first page is a printed "Contents" page."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    toc_page = doc.new_page()
+    toc_page.insert_text((72, 72), "Contents", fontsize=24)
+    entries = [
+        "Introduction .......................... 1",
+        "Layers ................................ 3",
+        "Conclusion ............................ 8",
+    ]
+    y = 120
+    for entry in entries:
+        toc_page.insert_text((72, y), entry, fontsize=11)
+        y += 20
+
+    body_page = doc.new_page()
+    body_page.insert_text((72, 72), "Introduction", fontsize=24)
+    body_page.insert_text(
+        (72, 110), "Networks move bytes between machines that will never meet.", fontsize=11
+    )
+
+    doc.save(str(dst))
+    doc.close()
+
+
+def write_epub_with_toc_page(dst: Path) -> None:
+    """An EPUB carrying a human-readable "Contents" chapter in its spine, on
+    top of the machine-generated `EpubNav` every EPUB already has."""
+    from ebooklib import epub
+
+    book = epub.EpubBook()
+    book.set_identifier("toc-page-epub")
+    book.set_title("A Book With A Printed Contents Page")
+    book.set_language("en")
+
+    toc_chapter = epub.EpubHtml(title="Contents", file_name="toc.xhtml", lang="en")
+    toc_chapter.content = """
+    <html><body>
+    <h1>Contents</h1>
+    <ul>
+      <li><a href="chap1.xhtml">Introduction</a></li>
+      <li><a href="chap1.xhtml#layers">Layers</a></li>
+      <li><a href="chap1.xhtml#conclusion">Conclusion</a></li>
+    </ul>
+    </body></html>
+    """
+    book.add_item(toc_chapter)
+
+    chapter = epub.EpubHtml(title="Introduction", file_name="chap1.xhtml", lang="en")
+    chapter.content = """
+    <html><body>
+    <h1>Introduction</h1>
+    <p>Networks move bytes between machines that will never meet.</p>
+    </body></html>
+    """
+    book.add_item(chapter)
+
+    book.toc = (epub.Link("chap1.xhtml", "Introduction", "intro"),)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", toc_chapter, chapter]
+    epub.write_epub(str(dst), book)
+
+
 def write_scanned_pdf(dst: Path) -> None:
     """A PDF with no text layer at all, like a raw scan."""
     import pymupdf

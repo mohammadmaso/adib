@@ -1,15 +1,23 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Loader } from "lucide-react";
+import { Eye, EyeOff, ImageIcon, KeyRound, Loader } from "lucide-react";
 import { toast } from "sonner";
 import { api, type components } from "@/lib/api-client";
-import { clearApiKey, getApiKey, setApiKey } from "@/lib/keychain";
+import {
+  clearApiKey,
+  clearImageApiKey,
+  getApiKey,
+  getImageApiKey,
+  setApiKey,
+  setImageApiKey,
+} from "@/lib/keychain";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 type ProviderSettings = components["schemas"]["ProviderSettings"];
+type ImageProviderSettings = components["schemas"]["ImageProviderSettings"];
 
 export default function SettingsRoute() {
   return (
@@ -21,31 +29,59 @@ export default function SettingsRoute() {
         </p>
       </div>
 
-      <ApiKeyCard />
+      <ApiKeyCard
+        title="API Key"
+        description="Stored in your OS keychain, never in a project file or log. Used for every analysis, glossary, and translation call across all projects."
+        get={getApiKey}
+        set={setApiKey}
+        clear={clearApiKey}
+      />
       <ProviderCard />
+
+      <ApiKeyCard
+        title="Image Provider API Key"
+        description="Stored in its own OS keychain slot — cover translation can point at a different vendor than the text provider above."
+        get={getImageApiKey}
+        set={setImageApiKey}
+        clear={clearImageApiKey}
+      />
+      <ImageProviderCard />
     </div>
   );
 }
 
-function ApiKeyCard() {
+function ApiKeyCard({
+  title,
+  description,
+  get,
+  set,
+  clear,
+}: {
+  title: string;
+  description: string;
+  get: () => Promise<string | null>;
+  set: (key: string) => Promise<void>;
+  clear: () => Promise<void>;
+}) {
   const [key, setKey] = useState("");
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [reveal, setReveal] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    getApiKey()
+    get()
       .then((k) => {
         setHasKey(!!k);
         if (k) setKey(k);
       })
       .catch(() => setHasKey(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function save() {
     setSaving(true);
     try {
-      await setApiKey(key);
+      await set(key);
       setHasKey(true);
       toast.success("API key saved to your OS keychain");
     } catch (e) {
@@ -55,10 +91,10 @@ function ApiKeyCard() {
     }
   }
 
-  async function clear() {
+  async function clearKey() {
     setSaving(true);
     try {
-      await clearApiKey();
+      await clear();
       setKey("");
       setHasKey(false);
       toast.success("API key cleared");
@@ -74,14 +110,11 @@ function ApiKeyCard() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <KeyRound className="size-4" aria-hidden />
-          API Key
+          {title}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">
-          Stored in your OS keychain, never in a project file or log. Used for every provider call
-          across all projects.
-        </p>
+        <p className="text-sm text-muted-foreground">{description}</p>
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <Input
@@ -106,7 +139,7 @@ function ApiKeyCard() {
             {saving && <Loader className="size-3.5 animate-spin" aria-hidden />}
             Save
           </Button>
-          <Button size="sm" variant="outline" disabled={hasKey === false || saving} onClick={clear}>
+          <Button size="sm" variant="outline" disabled={hasKey === false || saving} onClick={clearKey}>
             Clear
           </Button>
           {hasKey !== null && (
@@ -261,6 +294,118 @@ function ProviderCard() {
             <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
               {saveMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
               Save provider settings
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ImageProviderCard() {
+  const queryClient = useQueryClient();
+  const [provider, setProvider] = useState<ImageProviderSettings | null>(null);
+
+  const providerQuery = useQuery({
+    queryKey: ["image-provider"],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/image-provider");
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  useEffect(() => {
+    if (providerQuery.data) setProvider(providerQuery.data);
+  }, [providerQuery.data]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!provider) throw new Error("nothing to save");
+      const { data, error } = await api.PUT("/image-provider", { body: provider });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      setProvider(data);
+      queryClient.invalidateQueries({ queryKey: ["image-provider"] });
+      toast.success("Image provider settings saved");
+    },
+    onError: (error: unknown) => {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save image provider settings",
+      );
+    },
+  });
+
+  function set<K extends keyof ImageProviderSettings>(key: K, value: ImageProviderSettings[K]) {
+    setProvider((p) => (p ? { ...p, [key]: value } : p));
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ImageIcon className="size-4" aria-hidden />
+          Image Provider
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Used by Gate 3's cover translation — redraws a book's cover with its text in the target
+          language via a multimodal chat-completions endpoint (e.g. OpenRouter). Can point at a
+          different vendor than the text provider above.
+        </p>
+
+        {providerQuery.isLoading && (
+          <div className="grid h-24 place-items-center">
+            <Loader className="size-5 animate-spin text-muted-foreground" aria-hidden />
+          </div>
+        )}
+
+        {provider && (
+          <>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2 space-y-1.5">
+                <Label>Base URL</Label>
+                <Input value={provider.base_url} onChange={(e) => set("base_url", e.target.value)} />
+              </div>
+              <div className="col-span-2 space-y-1.5">
+                <Label>Model</Label>
+                <Input value={provider.model} onChange={(e) => set("model", e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Max retries</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={provider.max_retries}
+                  onChange={(e) => set("max_retries", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Request timeout (s)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={provider.request_timeout_s}
+                  onChange={(e) => set("request_timeout_s", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Price / image (USD)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={provider.price_per_image_usd}
+                  onChange={(e) => set("price_per_image_usd", Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
+              {saveMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
+              Save image provider settings
             </Button>
           </>
         )}

@@ -10,6 +10,14 @@ Heading levels come from two sources, in priority order:
 2. Font-size clustering across the whole document — sizes above the body size
    are bucketed into up to 6 heading levels, largest first.
 Neither is perfect; Gate 1 in the UI is where the user fixes what's left.
+
+A printed "Contents" page is a different problem from either of those: it's
+prose-shaped (a heading plus a wall of text) but it's not book content — every
+entry it lists already exists as a heading elsewhere in the tree, and the
+renderer regenerates a real navigational TOC from those headings at render
+time. Left alone it would get translated and rendered as a duplicate, stale
+copy of the book's own structure, so `ingest_pdf` recognizes and drops it
+(see `_looks_like_toc_page`).
 """
 
 from __future__ import annotations
@@ -20,7 +28,13 @@ from pathlib import Path
 
 import pymupdf
 
-from adib_engine.ingest.kit import cleanup_inline, make_asset_stager, table_from_pipe
+from adib_engine.ingest.kit import (
+    cleanup_inline,
+    is_toc_title,
+    looks_like_toc_lines,
+    make_asset_stager,
+    table_from_pipe,
+)
 from adib_engine.models.document import (
     AssetRef,
     DocNode,
@@ -33,6 +47,10 @@ from adib_engine.models.document import (
 #: Below this, a page is considered to have too little extractable text to
 #: trust the fast path — scans, image-only pages, or heavy OCR artifacts.
 MIN_CHARS_PER_PAGE = 40
+
+#: Smallest on-page image side (PDF points) still treated as a picture rather
+#: than a rule, spacer, or decorative shim.
+MIN_IMAGE_PT = 24.0
 
 #: Above this, extraction quality tends to degrade (multi-column magazine
 #: layouts, dense forms) and Docling's layout model should take over instead.
@@ -140,14 +158,62 @@ def ingest_pdf(path: Path, *, assets_dir: Path | None = None) -> DocTree:
     nodes: list[DocNode] = []
 
     try:
+        # Once a contents page is found, a following page that's still mostly
+        # leader-dot entries is treated as its continuation even without its
+        # own "Contents" heading (multi-page TOCs are common in longer books).
+        in_toc = False
         for page_no in range(doc.page_count):
             page = doc[page_no]
-            _ingest_page(page, page_no, tree, stage, bookmarks, font_levels, nodes)
+            page_nodes, page_lines = _ingest_page(
+                page, page_no, tree, stage, bookmarks, font_levels, nodes
+            )
+            in_toc = _looks_like_toc_page(page_nodes, page_lines, continuing=in_toc)
+            if in_toc:
+                continue
+            nodes.extend(page_nodes)
+        if doc.page_count:
+            # PDFs carry no dedicated cover asset (unlike EPUB's OPF manifest),
+            # so the first page image stands in for one — that's what Gate 3's
+            # cover panel and the export cover wiring key off.
+            cover_png = doc[0].get_pixmap(dpi=150).tobytes("png")
+            tree.meta.cover_asset_id = stage(cover_png, "image/png", ext="png")
     finally:
         doc.close()
 
     tree.nodes = nodes
     return tree
+
+
+def _looks_like_toc_page(
+    page_nodes: list[DocNode], page_lines: list[str], *, continuing: bool
+) -> bool:
+    """True when a page's own content, not its position, marks it as a TOC.
+
+    A page starts a TOC run when one of its headings names one ("Contents"),
+    regardless of how the rest of the page reads. A page continues a run only
+    while it's still mostly leader-dot entries — a "Contents" page's opening
+    paragraph is one thing, but a page after it that's back to normal prose
+    ends the run rather than being swallowed too. `page_lines` carries each
+    text block's *visual* lines (pymupdf joins them with spaces into
+    `DocNode.text`, which would hide the one-entry-per-line shape a contents
+    page relies on).
+    """
+    if any(n.kind is NodeKind.HEADING and is_toc_title(n.text or "") for n in page_nodes):
+        return True
+    if continuing:
+        return looks_like_toc_lines(page_lines)
+    return False
+
+
+def _block_text_lines(block: dict) -> list[str]:
+    """This block's text, one entry per visual line (spans joined, not lines)."""
+    lines: list[str] = []
+    for line in block["lines"]:
+        joined = "".join(span["text"] for span in line["spans"] if span["text"])
+        joined = cleanup_inline(joined)
+        if joined:
+            lines.append(joined)
+    return lines
 
 
 def _ingest_page(
@@ -158,10 +224,18 @@ def _ingest_page(
     bookmarks: dict[int, list[tuple[int, str]]],
     font_levels: dict[float, int],
     nodes: list[DocNode],
-) -> None:
+) -> tuple[list[DocNode], list[str]]:
+    """Parse one page into nodes, in reading order, plus its raw text lines.
+
+    `nodes` is the tree's accumulated node list so far — used only to seed
+    stable ordinals for this page's node ids, never mutated here. The caller
+    decides whether to keep or drop the page (see `_looks_like_toc_page`); the
+    returned lines feed that decision without being a node's own text.
+    """
     #: (y0, x0, DocNode) so every element on the page can be emitted in true
     #: reading order regardless of which pymupdf API produced it.
     page_items: list[tuple[float, float, DocNode]] = []
+    page_lines: list[str] = []
 
     def span(bbox: pymupdf.Rect) -> SourceSpan:
         return SourceSpan(page_start=page_no + 1, page_end=page_no + 1, bbox=tuple(bbox))
@@ -189,9 +263,15 @@ def _ingest_page(
         )
         table_bboxes.append(bbox)
 
+    page_width = page.rect.width or 1.0
     for info in page.get_image_info(xrefs=True):
         xref = info.get("xref", 0)
         if not xref:
+            continue
+        bbox = pymupdf.Rect(info["bbox"])
+        if bbox.width < MIN_IMAGE_PT or bbox.height < MIN_IMAGE_PT:
+            # Rules, spacers, and 1px shims: laying these out as figures adds
+            # noise to a book that never showed them as pictures.
             continue
         try:
             extracted = page.parent.extract_image(xref)
@@ -202,7 +282,10 @@ def _ingest_page(
             continue
         mime = f"image/{extracted.get('ext', 'png')}"
         aid = stage(data, mime, ext=extracted.get("ext"))
-        bbox = pymupdf.Rect(info["bbox"])
+        asset = tree.assets.get(aid)
+        if asset is not None and asset.width is None:
+            asset.width = extracted.get("width")
+            asset.height = extracted.get("height")
         page_items.append(
             (
                 bbox.y0,
@@ -212,6 +295,10 @@ def _ingest_page(
                     kind=NodeKind.FIGURE,
                     assets=[AssetRef(asset_id=aid)],
                     source=span(bbox),
+                    # How wide the picture was on its original page, so the
+                    # renderer can keep a half-page diagram half-page wide
+                    # instead of blowing every image up to the text column.
+                    attrs={"width_ratio": round(min(bbox.width / page_width, 1.0), 4)},
                 ),
             )
         )
@@ -230,6 +317,7 @@ def _ingest_page(
         block_text = cleanup_inline(block_text)
         if not block_text:
             continue
+        page_lines.extend(_block_text_lines(block))
 
         level = _heading_level_for(block_text, heading_hits, dominant_size, font_levels)
         kind = NodeKind.HEADING if level else NodeKind.PARAGRAPH
@@ -248,7 +336,7 @@ def _ingest_page(
         )
 
     page_items.sort(key=lambda item: (item[0], item[1]))
-    nodes.extend(node for _, _, node in page_items)
+    return [node for _, _, node in page_items], page_lines
 
 
 def _block_text_and_size(block: dict) -> tuple[str, float]:

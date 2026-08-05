@@ -7,6 +7,11 @@
     "core:default",
     "opener:default",
     "log:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "comment": "Gate 3 opens the exported PDF/EPUB in the user's default reader. `opener:default` covers reveal-in-folder but not open-path, and the scope has to be broad because the user picks the export folder themselves.",
+      "allow": [{ "path": "**" }, { "path": "/**" }]
+    }
   ]
 }

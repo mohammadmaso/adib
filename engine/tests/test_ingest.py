@@ -143,6 +143,82 @@ def test_pdf_fast_path_infers_headings_from_font_size(tmp_path: Path):
     # Every node carries page provenance for Gate 1's bbox highlighting.
     assert all(n.source.page_start == 1 for n in tree.walk())
 
+    # PDFs have no dedicated cover asset like EPUB's OPF manifest, so the first
+    # page image stands in for one.
+    assert tree.meta.cover_asset_id is not None
+    cover = tree.assets[tree.meta.cover_asset_id]
+    assert (tmp_path / "assets" / cover.path).exists()
+
+
+def test_pdf_drops_a_printed_contents_page(tmp_path: Path):
+    """A "Contents" page in the source PDF is redundant with the TOC the
+    renderer builds from headings at render time, so it must not become
+    translated prose alongside it."""
+    from adib_engine.ingest.pdf import ingest_pdf
+
+    path = tmp_path / "book_with_toc.pdf"
+    fx.write_pdf_with_toc(path)
+
+    tree = ingest_pdf(path, assets_dir=tmp_path / "assets")
+
+    texts = [n.text for n in tree.walk() if n.text]
+    assert not any(t.strip() == "Contents" for t in texts)
+    assert not any("....." in t for t in texts)
+    assert [h.text for h in tree.headings()] == ["Introduction"]
+
+
+def test_epub_drops_a_printed_contents_page(tmp_path: Path):
+    """Distinct from `EpubNav` (already excluded): a human-readable "Contents"
+    chapter that ships as an ordinary spine item must also be dropped."""
+    from adib_engine.ingest.epub import ingest_epub
+
+    path = tmp_path / "book_with_toc.epub"
+    fx.write_epub_with_toc_page(path)
+
+    tree = ingest_epub(path, assets_dir=tmp_path / "assets")
+
+    texts = [n.text for n in tree.walk() if n.text]
+    assert not any(t.strip() == "Contents" for t in texts)
+    assert not any(t == "Layers" for t in texts)  # only appears as a TOC link, not a heading
+    assert [h.text for h in tree.headings()] == ["Introduction"]
+
+
+def test_epub_cover_item_becomes_the_cover_asset(tmp_path: Path):
+    """EPUB ingest recognizes a manifest item named like "cover" as the book's
+    cover, distinct from any in-body figure."""
+    from ebooklib import epub
+
+    from adib_engine.ingest.epub import ingest_epub
+
+    book = epub.EpubBook()
+    book.set_identifier("cover-epub")
+    book.set_title("A Book With A Cover")
+    book.set_language("en")
+    chapter = epub.EpubHtml(title="Intro", file_name="chap1.xhtml", lang="en")
+    chapter.content = "<html><body><h1>Intro</h1><p>Hello.</p></body></html>"
+    book.add_item(chapter)
+    book.add_item(
+        epub.EpubItem(
+            uid="cover-image",
+            file_name="images/cover.png",
+            media_type="image/png",
+            content=b"\x89PNG\r\n\x1a\n" + b"0" * 600,  # over the 512-byte floor
+        )
+    )
+    book.toc = (epub.Link("chap1.xhtml", "Intro", "intro"),)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", chapter]
+    path = tmp_path / "book.epub"
+    epub.write_epub(str(path), book)
+
+    tree = ingest_epub(path, assets_dir=tmp_path / "assets")
+
+    assert tree.meta.cover_asset_id is not None
+    cover = tree.assets[tree.meta.cover_asset_id]
+    assert cover.mime == "image/png"
+    assert (tmp_path / "assets" / cover.path).exists()
+
 
 def test_pdf_probe_flags_a_scanned_document(tmp_path: Path):
     from adib_engine.ingest.pdf import probe_pdf
@@ -202,13 +278,43 @@ def test_router_rejects_an_unsupported_extension(tmp_path: Path):
         route(path)
 
 
-def test_router_reports_docling_missing_cleanly(tmp_path: Path):
-    """DOCX has no fast path yet; without the optional docling extra it must
-    fail with a clear message, not an ImportError traceback."""
+def test_router_reports_docling_missing_cleanly(tmp_path: Path, monkeypatch):
+    """DOCX has no fast path; when the optional docling extra isn't installed
+    it must fail with a clear message, not an ImportError traceback. Simulate
+    that via the import hook rather than relying on the ambient environment,
+    since dev/CI environments may have the docling extra installed."""
+    import builtins
+
     from adib_engine.ingest.router import UnsupportedFormatError, route
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "docling" or name.startswith("docling."):
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
 
     path = tmp_path / "book.docx"
     path.write_bytes(b"not a real docx")
 
     with pytest.raises(UnsupportedFormatError, match="docling"):
         route(path)
+
+
+def test_router_escalates_to_docling_when_forced(tmp_path: Path):
+    """With the optional docling extra installed, forcing escalation on a
+    normal PDF should route through docling instead of raising."""
+    pytest.importorskip("docling")
+    from adib_engine.ingest.router import route
+
+    path = tmp_path / "book.pdf"
+    fx.write_pdf(path)
+
+    tree, report = route(path, assets_dir=tmp_path / "assets", force_docling=True)
+
+    assert tree.parser == "docling"
+    assert report.parser == "docling"
+    assert report.escalated is True
+    assert report.escalation_reason == "forced"

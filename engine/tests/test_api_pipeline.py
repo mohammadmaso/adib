@@ -416,11 +416,22 @@ async def test_gate2_approve_rejects_unknown_preset(
 
 
 async def _fa_translate_fn(messages, info):
+    """Answer a batched translation prompt in the batch protocol.
+
+    `translate_book` packs many segments into one request, so the stand-in has
+    to echo every block marker back with its translation, the way a real
+    endpoint is instructed to.
+    """
     from pydantic_ai.messages import ModelResponse, TextPart
 
+    from adib_engine.agents.translate import BATCH_CLOSE, BATCH_OPEN, parse_batch_output
+
     prompt = messages[-1].parts[-1].content
-    source = prompt.strip().splitlines()[-1]
-    return ModelResponse(parts=[TextPart(content=f"[fa] {source}")])
+    blocks = parse_batch_output(prompt, count=10_000)
+    body = "\n".join(
+        f"{BATCH_OPEN}#{i}{BATCH_CLOSE}\n[fa] {text}" for i, text in sorted(blocks.items())
+    )
+    return ModelResponse(parts=[TextPart(content=body)])
 
 
 @pytest.fixture
@@ -462,6 +473,64 @@ async def test_translate_runs_and_reaches_review(
     segments = (await client.get(f"/projects/{project_id}/segments")).json()
     translated = [s["target_text"] for s in segments if s["target_text"]]
     assert translated and all(t.startswith("[fa]") for t in translated)
+
+
+async def test_starting_a_run_marks_the_project_translating_before_it_begins(
+    client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate, monkeypatch
+):
+    """Regression: a run started from any stage but `translating` (resuming a
+    pause, retrying a failure, re-running from review) left the stage alone, so
+    the UI showed no run in progress and `/translate/pause` answered 409 —
+    making an already-running translation impossible to stop.
+    """
+    import adib_engine.api.routes.gate3 as gate3
+
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+    await client.post(f"/projects/{project_id}/translate", json={})
+    await _wait_for_stage(client, project_id, "review", timeout=10.0)
+
+    real_translate_book = gate3.translate_book
+    seen: dict[str, str] = {}
+
+    async def watching_translate_book(store, *args, **kwargs):
+        seen["stage"] = store.meta().stage.value
+        return await real_translate_book(store, *args, **kwargs)
+
+    monkeypatch.setattr(gate3, "translate_book", watching_translate_book)
+
+    resp = await client.post(f"/projects/{project_id}/translate", json={})
+    assert resp.status_code == 202
+    # The run itself saw a project already marked as translating.
+    assert seen["stage"] == "translating"
+
+
+async def test_retrying_a_failed_run_clears_the_recorded_failure(
+    client: httpx.AsyncClient,
+    source_file: Path,
+    settings: RuntimeSettings,
+    patch_llm_agents,
+    patch_translate,
+):
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+
+    from adib_engine.models.project import ProjectStage
+    from adib_engine.store.project_store import PROJECT_SUFFIX, open_project
+
+    with open_project(settings.projects_dir / f"{project_id}{PROJECT_SUFFIX}") as store:
+        store.update_meta(
+            stage=ProjectStage.FAILED,
+            failed_stage=ProjectStage.TRANSLATING,
+            failed_reason="endpoint exploded",
+        )
+
+    await client.post(f"/projects/{project_id}/translate", json={})
+    await _wait_for_stage(client, project_id, "review", timeout=10.0)
+
+    meta = (await client.get(f"/projects/{project_id}")).json()
+    assert meta["failed_stage"] is None
+    assert meta["failed_reason"] is None
 
 
 async def test_pause_translation_rejected_when_not_translating(
@@ -531,6 +600,203 @@ async def test_export_produces_pdf_and_epub(
     meta = await _wait_for_stage(client, project_id, "done", timeout=20.0)
     assert meta["stage"] == "done"
 
+    # Default destination: the project's own .export folder, files named after
+    # the project rather than a generic "book".
     out_dir = settings.projects_dir / f"{project_id}.export"
-    assert (out_dir / "book.pdf").exists()
-    assert (out_dir / "book.epub").exists()
+    name = (await client.get(f"/projects/{project_id}")).json()["name"]
+    assert (out_dir / f"{name}.pdf").exists()
+    assert (out_dir / f"{name}.epub").exists()
+
+
+async def test_export_writes_to_a_chosen_folder_and_filename(
+    client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate, tmp_path: Path
+):
+    """The whole point of the picker: the book lands where the user chose."""
+    typst_bin = _find_typst_bin()
+    if typst_bin is None:
+        pytest.skip("no typst binary on PATH or bundled under apps/desktop")
+
+    from adib_engine.settings import get_settings
+
+    get_settings().typst_bin = Path(typst_bin)
+
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+    await client.post(f"/projects/{project_id}/translate", json={})
+    await _wait_for_stage(client, project_id, "review", timeout=10.0)
+
+    dest = tmp_path / "Desktop" / "exports"
+    resp = await client.post(
+        f"/projects/{project_id}/export",
+        json={"formats": ["epub"], "out_dir": str(dest), "filename": "My Book/v2"},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["directory"] == str(dest)
+
+    await _wait_for_stage(client, project_id, "done", timeout=20.0)
+    # The slash is stripped, not treated as a subdirectory.
+    assert (dest / "My Bookv2.epub").exists()
+    assert not (dest / "My Bookv2.pdf").exists()
+
+
+async def test_export_rejects_an_unusable_folder_before_starting(
+    client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate, tmp_path: Path
+):
+    """A bad path must fail the request, not the background run 30s later."""
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+    await client.post(f"/projects/{project_id}/translate", json={})
+    await _wait_for_stage(client, project_id, "review", timeout=10.0)
+
+    not_a_dir = tmp_path / "file.txt"
+    not_a_dir.write_text("x")
+
+    resp = await client.post(
+        f"/projects/{project_id}/export", json={"formats": ["epub"], "out_dir": str(not_a_dir)}
+    )
+    assert resp.status_code == 400
+    assert "not a folder" in resp.json()["detail"]
+
+    relative = await client.post(
+        f"/projects/{project_id}/export", json={"formats": ["epub"], "out_dir": "exports"}
+    )
+    assert relative.status_code == 400
+
+    # Refused up front means the project never left review.
+    stage = (await client.get(f"/projects/{project_id}")).json()["stage"]
+    assert stage == "review"
+
+
+async def test_export_target_previews_paths_without_writing_anything(
+    client: httpx.AsyncClient, source_file: Path, patch_llm_agents, patch_translate, tmp_path: Path
+):
+    project_id = "test-book"
+    await _reach_translating(client, source_file, project_id, patch_llm_agents)
+
+    dest = tmp_path / "picked"
+    resp = await client.get(
+        f"/projects/{project_id}/export/target",
+        params={"out_dir": str(dest), "filename": "Atomic Habits", "formats": "pdf,epub"},
+    )
+    assert resp.status_code == 200
+    target = resp.json()
+    assert target["directory"] == str(dest)
+    assert target["files"]["pdf"] == str(dest / "Atomic Habits.pdf")
+    assert target["files"]["epub"] == str(dest / "Atomic Habits.epub")
+    assert not (dest / "Atomic Habits.pdf").exists()
+
+
+# ---------------------------------------------------------------------------
+# Image provider settings + cover translation
+# ---------------------------------------------------------------------------
+
+
+async def test_image_provider_get_defaults_then_put_persists(client: httpx.AsyncClient):
+    defaults = await client.get("/image-provider")
+    assert defaults.status_code == 200
+    assert defaults.json()["base_url"] == "https://openrouter.ai/api/v1"
+
+    updated = dict(defaults.json(), model="my-image-model")
+    put_resp = await client.put("/image-provider", json=updated)
+    assert put_resp.status_code == 200
+    assert put_resp.json()["model"] == "my-image-model"
+
+    refetched = await client.get("/image-provider")
+    assert refetched.json()["model"] == "my-image-model"
+
+
+@pytest.fixture
+def epub_with_cover(tmp_path: Path) -> Path:
+    from ebooklib import epub
+
+    book = epub.EpubBook()
+    book.set_identifier("cover-epub")
+    book.set_title("A Book With A Cover")
+    book.set_language("en")
+    chapter = epub.EpubHtml(title="Intro", file_name="chap1.xhtml", lang="en")
+    chapter.content = "<html><body><h1>Intro</h1><p>Hello there.</p></body></html>"
+    book.add_item(chapter)
+    book.add_item(
+        epub.EpubItem(
+            uid="cover-image",
+            file_name="images/cover.png",
+            media_type="image/png",
+            content=b"\x89PNG\r\n\x1a\n" + b"0" * 600,
+        )
+    )
+    book.toc = (epub.Link("chap1.xhtml", "Intro", "intro"),)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", chapter]
+    path = tmp_path / "cover-book.epub"
+    epub.write_epub(str(path), book)
+    return path
+
+
+async def _ingest_and_reach_structure_review(
+    client: httpx.AsyncClient, source_file: Path, name: str = "Test Book"
+) -> str:
+    resp = await client.post("/projects", json=_create_payload(source_file, name=name))
+    project_id = resp.json()["project_id"]
+    await client.post(f"/projects/{project_id}/ingest")
+    await _wait_for_stage(client, project_id, "structure_review")
+    return project_id
+
+
+async def test_cover_status_reports_the_source_cover(
+    client: httpx.AsyncClient, epub_with_cover: Path
+):
+    project_id = await _ingest_and_reach_structure_review(client, epub_with_cover, "Cover Book")
+
+    status = await client.get(f"/projects/{project_id}/cover")
+    assert status.status_code == 200
+    body = status.json()
+    assert body["has_source_cover"] is True
+    assert body["source_asset_id"] is not None
+    assert body["translated_asset_id"] is None
+
+    asset_resp = await client.get(f"/projects/{project_id}/assets/{body['source_asset_id']}")
+    assert asset_resp.status_code == 200
+    assert asset_resp.headers["content-type"] == "image/png"
+
+
+async def test_project_without_a_cover_reports_none(
+    client: httpx.AsyncClient, source_file: Path
+):
+    project_id = await _ingest_and_reach_structure_review(client, source_file)
+
+    status = await client.get(f"/projects/{project_id}/cover")
+    assert status.json()["has_source_cover"] is False
+
+    resp = await client.post(f"/projects/{project_id}/cover/translate", json={})
+    assert resp.status_code == 409
+
+
+async def test_cover_translate_stages_the_result_and_wires_it_into_export(
+    client: httpx.AsyncClient, epub_with_cover: Path, monkeypatch
+):
+    import adib_engine.api.routes.cover as cover_mod
+    from adib_engine.agents.cover import CoverResult
+
+    async def fake_translate_cover(image_bytes, mime, *, target_lang, provider, api_key):
+        return CoverResult(image_bytes=b"translated-png-bytes", cost_usd=0.03)
+
+    monkeypatch.setattr(cover_mod, "translate_cover", fake_translate_cover)
+
+    project_id = await _ingest_and_reach_structure_review(client, epub_with_cover, "Cover Book 2")
+
+    resp = await client.post(f"/projects/{project_id}/cover/translate", json={})
+    assert resp.status_code == 202
+
+    deadline = time.monotonic() + 5.0
+    body = None
+    while time.monotonic() < deadline:
+        body = (await client.get(f"/projects/{project_id}/cover")).json()
+        if body["translated_asset_id"]:
+            break
+        await asyncio.sleep(0.02)
+    assert body is not None and body["translated_asset_id"], "cover translation never completed"
+
+    asset_resp = await client.get(f"/projects/{project_id}/assets/{body['translated_asset_id']}")
+    assert asset_resp.status_code == 200
+    assert asset_resp.content == b"translated-png-bytes"

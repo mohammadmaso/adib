@@ -17,8 +17,13 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
 from adib_engine.agents.translate import (
+    BATCH_CLOSE,
+    BATCH_OPEN,
     PLACEHOLDER_CLOSE,
     PLACEHOLDER_OPEN,
+    build_batches,
+    needs_model,
+    parse_batch_output,
     protect_spans,
     restore_spans,
     translate_book,
@@ -171,15 +176,226 @@ def test_translate_segment_includes_heading_path_and_rolling_context():
 
 
 # ---------------------------------------------------------------------------
+# Batching: packing, parsing, and the savings that justify both.
+# ---------------------------------------------------------------------------
+
+
+def _seg(i: int, text: str, path: list[str] | None = None) -> Segment:
+    return Segment(
+        id=f"seg-{i}", node_id=f"n{i}", ordinal=i, kind="paragraph",
+        source_text=text, heading_path=path or [],
+    )
+
+
+def test_build_batches_packs_up_to_the_character_budget():
+    segments = [_seg(i, "x" * 100) for i in range(10)]
+    batches = build_batches(segments, max_chars=250, max_segments=99)
+    assert [len(b) for b in batches] == [2, 2, 2, 2, 2]
+
+
+def test_build_batches_honours_the_segment_count_cap():
+    segments = [_seg(i, "tiny") for i in range(10)]
+    batches = build_batches(segments, max_chars=10_000, max_segments=4)
+    assert [len(b) for b in batches] == [4, 4, 2]
+
+
+def test_build_batches_gives_an_oversized_segment_its_own_batch():
+    segments = [_seg(0, "short"), _seg(1, "x" * 9000), _seg(2, "short")]
+    batches = build_batches(segments, max_chars=1000, max_segments=99)
+    assert [len(b) for b in batches] == [1, 1, 1]
+    # Reading order is never disturbed by the packing.
+    assert [s.id for b in batches for s in b] == ["seg-0", "seg-1", "seg-2"]
+
+
+def test_build_batches_preserves_every_segment_exactly_once():
+    segments = [_seg(i, "x" * (i * 37 % 400 + 1)) for i in range(50)]
+    batches = build_batches(segments, max_chars=500, max_segments=7)
+    assert [s.id for b in batches for s in b] == [s.id for s in segments]
+
+
+def test_parse_batch_output_reads_markers_on_their_own_line():
+    text = f"{BATCH_OPEN}#1{BATCH_CLOSE}\nیک\n{BATCH_OPEN}#2{BATCH_CLOSE}\nدو"
+    assert parse_batch_output(text, 2) == {1: "یک", 2: "دو"}
+
+
+def test_parse_batch_output_tolerates_translation_on_the_marker_line():
+    text = f"{BATCH_OPEN}#1{BATCH_CLOSE} یک\n{BATCH_OPEN}#2{BATCH_CLOSE} دو"
+    assert parse_batch_output(text, 2) == {1: "یک", 2: "دو"}
+
+
+def test_parse_batch_output_reports_only_the_blocks_that_came_back():
+    """A short response is not a parse failure — the caller retries the rest."""
+    text = f"{BATCH_OPEN}#1{BATCH_CLOSE}\nیک\n{BATCH_OPEN}#3{BATCH_CLOSE}\nسه"
+    assert parse_batch_output(text, 3) == {1: "یک", 3: "سه"}
+
+
+def test_parse_batch_output_ignores_out_of_range_and_duplicate_markers():
+    text = (
+        f"{BATCH_OPEN}#1{BATCH_CLOSE}\nیک\n"
+        f"{BATCH_OPEN}#1{BATCH_CLOSE}\nدوباره\n"
+        f"{BATCH_OPEN}#9{BATCH_CLOSE}\nخارج"
+    )
+    assert parse_batch_output(text, 2) == {1: "یک"}
+
+
+def test_parse_batch_output_tolerates_ascii_ified_markers():
+    # Some models echo the marker back as ASCII `[[#N]]` instead of the exact
+    # ⟦#N⟧ glyphs; that must still be treated as a delimiter, not leak into
+    # a segment's translated body.
+    text = "[[#1]]\nیک\n[[#2]]\nدو"
+    assert parse_batch_output(text, 2) == {1: "یک", 2: "دو"}
+
+
+def test_needs_model_is_false_for_segments_with_no_letters():
+    assert not needs_model("3.")
+    assert not needs_model("—")
+    assert not needs_model("• ")
+    assert needs_model("Chapter 3")
+    assert needs_model("فصل")
+
+
+def test_translate_book_sends_one_request_for_a_whole_batch(store):
+    """The point of the exercise: N short segments cost one call, not N."""
+    store.sync_segments(simple_book())
+    total = len(store.segments())
+    calls = {"n": 0}
+
+    def counting_fn(messages: list[ModelMessage], info) -> ModelResponse:
+        calls["n"] += 1
+        return _echo_batch()(messages, info)
+
+    result = asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(counting_fn), concurrency=1)
+    )
+    assert calls["n"] == 1
+    assert result["segments"] == total
+    assert store.pending_segments() == []
+
+
+def test_translate_book_amortizes_the_prompt_preamble_across_the_batch(store):
+    """The system prompt and instructions are sent once per batch, not per
+    segment — that ratio is the whole token saving."""
+    store.sync_segments(simple_book())
+    prompts: list[str] = []
+
+    def capturing_fn(messages: list[ModelMessage], info) -> ModelResponse:
+        prompts.append(messages[-1].parts[-1].content)
+        return _echo_batch()(messages, info)
+
+    asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(capturing_fn), concurrency=1)
+    )
+    assert len(prompts) == 1
+    # One instruction preamble carrying every source block.
+    assert prompts[0].count("Translate all") == 1
+    assert len(_blocks_in(prompts[0])) == len(store.segments())
+
+
+def test_translate_book_splits_batch_token_usage_across_its_segments(store):
+    """Per-segment cost must still add up to what the batch actually spent."""
+    store.sync_segments(simple_book())
+    result = asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(_upper_fn), concurrency=1)
+    )
+    segments = store.segments()
+    assert sum(s.prompt_tokens + s.completion_tokens for s in segments) == result["tokens"]
+    assert sum(s.cost_usd for s in segments) == pytest.approx(result["cost_usd"])
+
+
+def test_translate_book_settles_untranslatable_segments_without_a_request(store):
+    """A segment with no letters in it never reaches the model."""
+    from adib_engine.models.document import NodeKind
+    from tests.fixtures import node
+
+    tree = simple_book()
+    tree.nodes.append(node(NodeKind.PARAGRAPH, "42.", 99))
+    store.sync_segments(tree)
+
+    seen: list[str] = []
+
+    def capturing_fn(messages: list[ModelMessage], info) -> ModelResponse:
+        seen.append(messages[-1].parts[-1].content)
+        return _echo_batch()(messages, info)
+
+    result = asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(capturing_fn), concurrency=1)
+    )
+    assert result["skipped"] == 1
+    assert all("42." not in prompt for prompt in seen)
+    trivial = next(s for s in store.segments() if s.source_text == "42.")
+    assert trivial.status == SegmentStatus.SKIPPED
+    assert trivial.target_text == "42."
+    assert trivial.cost_usd == 0.0
+
+
+def test_translate_book_retries_only_the_blocks_a_batch_dropped(store):
+    """A model that silently omits a block gets asked again for that block
+    alone, rather than the batch being re-sent or the segment lost."""
+    store.sync_segments(simple_book())
+    dropped: dict[str, int] = {"n": 0}
+
+    def forgetful_fn(messages: list[ModelMessage], info) -> ModelResponse:
+        blocks = _blocks_in(messages[-1].parts[-1].content)
+        # Lose the last block of the first (multi-block) response only.
+        if len(blocks) > 1 and dropped["n"] == 0:
+            dropped["n"] += 1
+            blocks.pop(max(blocks))
+        body = "\n".join(
+            f"{BATCH_OPEN}#{i}{BATCH_CLOSE}\n[fa] {text}" for i, text in sorted(blocks.items())
+        )
+        return ModelResponse(parts=[TextPart(content=body)])
+
+    result = asyncio.run(
+        translate_book(store, PROVIDER, _preset(), model=FunctionModel(forgetful_fn), concurrency=1)
+    )
+    assert not result["failed"]
+    assert store.pending_segments() == []
+
+
+def test_translate_book_only_ids_leaves_other_pending_segments_alone(store):
+    store.sync_segments(simple_book())
+    all_ids = [s.id for s in store.segments()]
+    target = all_ids[1]
+
+    result = asyncio.run(
+        translate_book(
+            store, PROVIDER, _preset(), model=FunctionModel(_upper_fn), only_ids={target}
+        )
+    )
+    assert result["queued"] == 1
+    assert store.get_segment(target).target_text.startswith("[fa]")
+    assert [s.id for s in store.pending_segments()] == [i for i in all_ids if i != target]
+
+
+# ---------------------------------------------------------------------------
 # translate_book: resumable orchestration against a real store.
 # ---------------------------------------------------------------------------
 
 
-def _upper_fn(messages: list[ModelMessage], info) -> ModelResponse:
-    prompt = messages[-1].parts[-1].content
-    # last line of the prompt is the source text (see _build_prompt).
-    source = prompt.strip().splitlines()[-1]
-    return ModelResponse(parts=[TextPart(content=f"[fa] {source}")])
+def _blocks_in(prompt: str) -> dict[int, str]:
+    """The numbered source blocks a batched prompt is carrying."""
+    return parse_batch_output(prompt, count=10_000)
+
+
+def _echo_batch(reply_for=lambda source: f"[fa] {source}"):
+    """A model that answers a batched prompt in the batch protocol.
+
+    Stands in for a well-behaved endpoint: every marker echoed exactly once, in
+    order, with the block's translation under it.
+    """
+
+    def fn(messages: list[ModelMessage], info) -> ModelResponse:
+        blocks = _blocks_in(messages[-1].parts[-1].content)
+        body = "\n".join(
+            f"{BATCH_OPEN}#{i}{BATCH_CLOSE}\n{reply_for(text)}"
+            for i, text in sorted(blocks.items())
+        )
+        return ModelResponse(parts=[TextPart(content=body)])
+
+    return fn
+
+
+_upper_fn = _echo_batch()
 
 
 def test_translate_book_translates_every_pending_segment_and_commits(store):
@@ -203,6 +419,8 @@ def test_translate_book_is_a_noop_when_nothing_pending(store):
     assert result == {
         "queued": 0,
         "segments": 0,
+        "skipped": 0,
+        "requests": 0,
         "tokens": 0,
         "cost_usd": 0.0,
         "failed": [],
@@ -269,6 +487,7 @@ def test_translate_book_stops_early_when_paused(store):
             _preset(),
             model=FunctionModel(_upper_fn),
             concurrency=1,
+            batch_segments=1,  # one segment per request, so the pause lands early
             progress=completed.append,
             should_pause=lambda: len(completed) >= 1,
         )
@@ -279,26 +498,35 @@ def test_translate_book_stops_early_when_paused(store):
     assert store.pending_segments()  # something left for the next run
 
 
-def test_translate_book_records_failure_without_aborting_the_batch(store):
+def test_translate_book_isolates_one_poisonous_segment_from_its_batch(store):
+    """A segment the endpoint always chokes on must not take its batch with it.
+
+    The batch is halved on failure until the bad segment stands alone, so it is
+    the only one recorded as FAILED — everything packed alongside it still lands.
+    """
     store.sync_segments(simple_book())
     all_ids = [s.id for s in store.segments()]
-    calls = {"n": 0}
+    # A body paragraph, not a heading: a heading also appears in every later
+    # segment's "Section:" context line, which would poison unrelated batches.
+    poison = "The stack is layered so each part can change independently."
+    bad_id = next(s.id for s in store.segments() if s.source_text == poison)
 
     def flaky_fn(messages: list[ModelMessage], info) -> ModelResponse:
-        calls["n"] += 1
-        if calls["n"] == 1:
+        prompt = messages[-1].parts[-1].content
+        if poison in prompt:
             raise RuntimeError("simulated 500")
-        return ModelResponse(parts=[TextPart(content="[fa] ok")])
+        return _echo_batch()(messages, info)
 
     result = asyncio.run(
         translate_book(store, PROVIDER, _preset(), model=FunctionModel(flaky_fn), concurrency=1)
     )
     assert len(result["failed"]) == 1
     failed_id = result["failed"][0][0]
+    assert failed_id == bad_id
     failed_seg = store.get_segment(failed_id)
     assert failed_seg.status == SegmentStatus.FAILED
     assert failed_seg.error == "simulated 500"
-    # Everything else in the batch still completed.
+    # Everything else survived the split-and-retry.
     assert result["segments"] == len(all_ids) - 1
 
 
@@ -314,10 +542,9 @@ def test_translate_book_flags_segments_that_fail_qa(store):
     store.sync_segments(simple_book())
     all_ids = [s.id for s in store.segments()]
 
-    def leaky_fn(messages: list[ModelMessage], info) -> ModelResponse:
-        return ModelResponse(
-            parts=[TextPart(content=f"{PLACEHOLDER_OPEN}9{PLACEHOLDER_CLOSE} translated text")]
-        )
+    leaky_fn = _echo_batch(
+        lambda source: f"{PLACEHOLDER_OPEN}9{PLACEHOLDER_CLOSE} translated text"
+    )
 
     result = asyncio.run(
         translate_book(store, PROVIDER, _preset(), model=FunctionModel(leaky_fn), concurrency=1)

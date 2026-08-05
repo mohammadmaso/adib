@@ -14,7 +14,18 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from adib_engine import __version__
-from adib_engine.api.routes import events, gate1, gate2, gate3, ingest, presets, projects, provider
+from adib_engine.api.routes import (
+    cover,
+    events,
+    gate1,
+    gate2,
+    gate3,
+    image_provider,
+    ingest,
+    presets,
+    projects,
+    provider,
+)
 from adib_engine.api.watchdog import Heartbeat
 from adib_engine.settings import get_settings
 
@@ -92,9 +103,11 @@ def create_app() -> FastAPI:
     app.include_router(gate1.router)
     app.include_router(gate2.router)
     app.include_router(gate3.router)
+    app.include_router(cover.router)
     app.include_router(presets.router)
     app.include_router(provider.router)
     app.include_router(provider.probe_router)
+    app.include_router(image_provider.router)
     app.include_router(events.router)
 
     return app

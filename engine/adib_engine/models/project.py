@@ -90,6 +90,26 @@ class ProviderSettings(BaseModel):
     price_per_mtok_out: float = 0.0
 
 
+class ImageProviderSettings(BaseModel):
+    """Multimodal chat-completions endpoint config, for cover translation.
+
+    Image-editing models are almost always served through `/chat/completions`
+    with `modalities: ["image", "text"]` rather than a dedicated images API —
+    that's how aggregators like OpenRouter expose them — so this is the same
+    "OpenAI-compatible endpoint" shape as `ProviderSettings`. The API key lives
+    in the OS keychain (a separate slot from the text provider's) and is
+    injected at call time, never persisted here.
+    """
+
+    base_url: str = "https://openrouter.ai/api/v1"
+    model: str = "google/gemini-2.5-flash-image-preview"
+    max_retries: int = 3
+    request_timeout_s: float = 180.0
+    #: Flat per-image price, used for the cost estimate — image APIs typically
+    #: bill per generated image rather than per token.
+    price_per_image_usd: float = 0.0
+
+
 class ProjectMeta(SQLModel, table=True):
     """Single-row table holding the project's identity and current state."""
 
@@ -119,6 +139,12 @@ class ProjectMeta(SQLModel, table=True):
     #: run is reproducible even if the preset library later changes.
     preset: dict | None = Field(default=None, sa_column=Column(JSON))
     analysis: dict | None = Field(default=None, sa_column=Column(JSON))
+    #: Serialized `Asset` (id/path/mime/dims/sha256) for the target-language
+    #: cover, once cover translation has run. The PNG itself lives in
+    #: `assets_dir` like any other staged asset; this is not tied to either
+    #: the source or target `DocTree` since it's produced independently of a
+    #: translation run and both trees get rebuilt/copied around it.
+    translated_cover_asset: dict | None = Field(default=None, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime))

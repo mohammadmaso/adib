@@ -23,6 +23,9 @@ pub fn run() {
             keychain::get_api_key,
             keychain::set_api_key,
             keychain::clear_api_key,
+            keychain::get_image_api_key,
+            keychain::set_image_api_key,
+            keychain::clear_image_api_key,
         ])
         .setup(|app| {
             sidecar::init(app.handle());

@@ -52,22 +52,45 @@ def _table_block(table: TableData) -> str:
     return f"#{tbl}"
 
 
+def _image_width(node: DocNode) -> str:
+    """Typst `width:` for this figure's images.
+
+    Ingest records `width_ratio` — how much of the source page's width the
+    picture occupied — so a half-page diagram stays half-page here instead of
+    being stretched to the text column. Sources that carry no such measurement
+    (EPUB, HTML, markdown) fall back to the full column, which is what a web
+    layout gives them anyway.
+    """
+    ratio = node.attrs.get("width_ratio")
+    if not isinstance(ratio, int | float) or not 0 < ratio <= 1:
+        return "100%"
+    return f"{round(ratio * 100, 1)}%"
+
+
 def _figure_block(node: DocNode, tree: DocTree, assets_dir: Path | None) -> str:
-    images = [
-        f'image("{path}")'
-        for ref in node.assets
-        if (path := _asset_path(tree, ref, assets_dir))
+    paths = [
+        path for ref in node.assets if (path := _asset_path(tree, ref, assets_dir))
     ]
     caption = next((ref.caption for ref in node.assets if ref.caption), None) or node.text
-    if not images:
+    if not paths:
         return ""
-    if len(images) == 1:
-        body = images[0]
+    if len(paths) == 1:
+        body = f'image("{paths[0]}", width: {_image_width(node)})'
     else:
-        body = f"grid(columns: {len(images)}, {', '.join(images)})"
+        # Each image fills its own equal-width column, so a row of pictures
+        # keeps the side-by-side arrangement the source had.
+        cells = ", ".join(f'image("{p}", width: 100%)' for p in paths)
+        body = f"grid(columns: (1fr,) * {len(paths)}, column-gutter: 6pt, {cells})"
     if caption:
-        return f"#figure(\n  {body},\n  caption: [{inline_to_typst(caption)}],\n)"
-    return f"#figure(\n  {body},\n)"
+        # `placement: none` keeps the figure between the same two paragraphs it
+        # sat between in the source book, rather than floating to a page top.
+        return (
+            f"#figure(\n  {body},\n  caption: [{inline_to_typst(caption)}],"
+            "\n  placement: none,\n)"
+        )
+    # No caption in the source means no caption — and no "Figure 1:" number
+    # the original book never had. Just the picture, in place, centred.
+    return f"#align(center, block(breakable: false, {body}))"
 
 
 def _list_block(node: DocNode) -> str:
@@ -110,6 +133,26 @@ def node_to_typst(node: DocNode, tree: DocTree, assets_dir: Path | None = None) 
     return ""
 
 
+def cover_page(tree: DocTree, assets_dir: Path | None = None) -> str:
+    """A full-bleed page for the book's cover, or "" if it has none.
+
+    Placed ahead of the rest of the body by `render_typst_source`, with its own
+    `#pagebreak()` so the first content page still starts clean.
+    """
+    cover_id = tree.meta.cover_asset_id
+    if not cover_id:
+        return ""
+    asset = tree.assets.get(cover_id)
+    if asset is None:
+        return ""
+    if assets_dir is not None and not (assets_dir / asset.path).exists():
+        return ""
+    return (
+        f'#page(margin: 0pt)[#image("{asset.path}", width: 100%, height: 100%, fit: "cover")]'
+        "\n#pagebreak()"
+    )
+
+
 def tree_to_typst_body(tree: DocTree, assets_dir: Path | None = None) -> str:
     """Walk the whole tree (skipping list/container internals) into one .typ body.
 
@@ -140,4 +183,4 @@ def _walk_top_level(node: DocNode, tree: DocTree, assets_dir: Path | None) -> li
     return blocks
 
 
-__all__ = ["node_to_typst", "tree_to_typst_body"]
+__all__ = ["cover_page", "node_to_typst", "tree_to_typst_body"]

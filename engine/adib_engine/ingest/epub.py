@@ -4,6 +4,13 @@ EPUB is the highest-fidelity input we accept: the document is already segmented
 into spine items with real `<h1..h6>`/`<p>`/`<figure>`/`<table>` semantics, so
 heading levels come from structure directly instead of font-size inference. We
 walk the OPF spine in order and collect translated captions/alt as prose.
+
+Two different things both count as "the table of contents" here, and neither
+becomes book content: `EpubNav` (the machine-readable nav document `ebooklib`
+already segregates from `ITEM_DOCUMENT`) and a human-readable "Contents" page
+that ships as an ordinary spine chapter, which `_spine_item_is_toc` detects.
+Both are redundant with the renderer's own TOC, built from this tree's
+headings at render time — see `render.epub.compile` / `render.typst.document`.
 """
 
 from __future__ import annotations
@@ -14,7 +21,12 @@ from pathlib import Path
 from ebooklib import ITEM_DOCUMENT, ITEM_IMAGE, epub
 from lxml import html as lxml_html
 
-from adib_engine.ingest.kit import cleanup_inline, make_asset_stager
+from adib_engine.ingest.kit import (
+    cleanup_inline,
+    is_toc_title,
+    looks_like_toc_lines,
+    make_asset_stager,
+)
 from adib_engine.models.document import (
     AssetRef,
     DocNode,
@@ -58,6 +70,44 @@ def _img_src_to_bytes(book: epub.EpubBook, item, src: str) -> tuple[bytes | None
         if name == resolved or name.endswith("/" + posixpath.basename(src)):
             return it.get_content(), it.media_type
     return None, None
+
+
+def _looks_like_toc_item(el) -> bool:
+    """True when `el` (a `<li>` or `<p>`) is just a link to elsewhere in the book."""
+    links = el.findall(".//a")
+    if len(links) != 1:
+        return False
+    href = links[0].get("href") or ""
+    if href.lower().startswith(("http:", "https:", "mailto:")):
+        return False
+    text = _inline_text(el)
+    return bool(text) and text == _inline_text(links[0])
+
+
+def _spine_item_is_toc(body_el) -> bool:
+    """A human-readable "Contents" page, as opposed to `EpubNav` (already
+    skipped elsewhere): a title naming one, or a wall of entries that are
+    either single internal links or leader-dot "label ... N" lines.
+
+    Common in EPUBs converted from a print book, which often carry both the
+    machine nav *and* this kind of page as an ordinary spine chapter. Left
+    in, it would duplicate every heading in the book as translated prose,
+    right next to the real navigational TOC the renderer builds from those
+    same headings.
+    """
+    for el in body_el.iter():
+        tag = el.tag
+        if isinstance(tag, str) and tag in ("h1", "h2", "h3", "h4") and is_toc_title(
+            _inline_text(el)
+        ):
+            return True
+
+    entries = [el for el in body_el.iter() if isinstance(el.tag, str) and el.tag in ("li", "p")]
+    if len(entries) < 3:
+        return False
+    if sum(1 for e in entries if _looks_like_toc_item(e)) / len(entries) >= 0.7:
+        return True
+    return looks_like_toc_lines([_inline_text(e) for e in entries])
 
 
 def _collect_block(
@@ -322,8 +372,11 @@ def ingest_epub(
         except Exception:
             continue
         body_el = root.find(".//body")
+        target = body_el if body_el is not None else root
+        if _spine_item_is_toc(target):
+            continue
         _collect_block(
-            body_el if body_el is not None else root,
+            target,
             book=book,
             item=item,
             stage=stage,

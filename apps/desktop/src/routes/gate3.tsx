@@ -1,18 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, CircleAlert, FolderOpen, Loader, Pause, Sparkles } from "lucide-react";
+import { CircleAlert, Loader, Pause, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { api, type components } from "@/lib/api-client";
 import { getApiKey } from "@/lib/keychain";
 import { useProjectEvents } from "@/hooks/use-project-events";
 import { SegmentRow } from "@/components/gate3/segment-row";
+import { ExportPanel } from "@/components/gate3/export-panel";
+import { CoverPanel, CoverTranslateFailedNotice } from "@/components/gate3/cover-panel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
 
 type SegmentStatus = components["schemas"]["SegmentStatus"];
 
@@ -30,8 +29,9 @@ export default function Gate3Route() {
   const translateTriggered = useRef(false);
   const [filter, setFilter] = useState<SegmentStatus | "all">("all");
   const [retranslating, setRetranslating] = useState<Set<string>>(new Set());
-  const [exportFormats, setExportFormats] = useState({ pdf: true, epub: true });
   const [outputs, setOutputs] = useState<Record<string, string> | null>(null);
+  const [coverTranslating, setCoverTranslating] = useState(false);
+  const [coverFailedReason, setCoverFailedReason] = useState<string | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -59,7 +59,10 @@ export default function Gate3Route() {
   //  in progress rather than being hidden behind a full-screen spinner.
   const hasSegments = stage != null && !isTranslateFailure;
 
-  const event = useProjectEvents(projectId, isTranslating || isExporting || retranslating.size > 0);
+  const event = useProjectEvents(
+    projectId,
+    isTranslating || isExporting || retranslating.size > 0 || coverTranslating,
+  );
 
   const countsQuery = useQuery({
     queryKey: ["segment-counts", projectId],
@@ -112,15 +115,22 @@ export default function Gate3Route() {
       });
       if (error) throw error;
     },
+    //  The engine stops picking up work at the next batch boundary rather than
+    //  killing requests in flight, so the stage flips a moment later — say so
+    //  instead of leaving the button looking unresponsive.
+    onSuccess: () => toast.info("Pausing — finishing the requests already in flight…"),
     onError: (error: unknown) => {
       toast.error(error instanceof Error ? error.message : "Failed to pause translation");
     },
   });
 
+  const pauseRequested = pauseMutation.isPending || pauseMutation.isSuccess;
+
   useEffect(() => {
     if (isTranslating && !translateTriggered.current) {
       translateTriggered.current = true;
       translateMutation.mutate();
+      pauseMutation.reset(); // a new run is pausable again
     }
     if (!isTranslating) translateTriggered.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,6 +162,20 @@ export default function Gate3Route() {
         return next;
       });
       toast.error("Retranslation failed");
+    }
+    if (event.stage === "cover_translating") {
+      setCoverTranslating(true);
+      setCoverFailedReason(null);
+    }
+    if (event.stage === "cover_translated") {
+      setCoverTranslating(false);
+      queryClient.invalidateQueries({ queryKey: ["cover", projectId] });
+    }
+    if (event.stage === "cover_translate_failed") {
+      setCoverTranslating(false);
+      setCoverFailedReason(
+        typeof event.error === "string" ? event.error : "Cover translation failed",
+      );
     }
     if (event.stage === "done") {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
@@ -203,19 +227,27 @@ export default function Gate3Route() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (request: components["schemas"]["ExportRequest"]) => {
       if (!projectId) throw new Error("no project");
-      const formats = Object.entries(exportFormats)
-        .filter(([, on]) => on)
-        .map(([f]) => f);
       const { error } = await api.POST("/projects/{project_id}/export", {
         params: { path: { project_id: projectId } },
-        body: { formats },
+        body: request,
       });
       if (error) throw error;
     },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+    },
     onError: (error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "Failed to start export");
+      // A rejected destination (unwritable folder, bad path) comes back as the
+      // engine's own detail string; that is the useful thing to show.
+      const detail =
+        typeof error === "object" && error && "detail" in error
+          ? String((error as { detail: unknown }).detail)
+          : error instanceof Error
+            ? error.message
+            : "Failed to start export";
+      toast.error(detail);
     },
   });
 
@@ -306,15 +338,15 @@ export default function Gate3Route() {
           <Button
             variant="outline"
             size="sm"
-            disabled={pauseMutation.isPending}
+            disabled={pauseRequested}
             onClick={() => pauseMutation.mutate()}
           >
-            {pauseMutation.isPending ? (
+            {pauseRequested ? (
               <Loader className="size-3.5 animate-spin" aria-hidden />
             ) : (
               <Pause className="size-3.5" aria-hidden />
             )}
-            Pause
+            {pauseRequested ? "Pausing…" : "Pause"}
           </Button>
         </div>
       )}
@@ -333,6 +365,17 @@ export default function Gate3Route() {
           </Button>
         </div>
       )}
+
+      {coverFailedReason && (
+        <div className="border-b border-border px-8 py-3">
+          <CoverTranslateFailedNotice message={coverFailedReason} />
+        </div>
+      )}
+      <CoverPanel
+        projectId={projectId!}
+        translating={coverTranslating}
+        onTranslatingChange={setCoverTranslating}
+      />
 
       <div className="flex-1 overflow-y-auto">
         {segmentsQuery.isLoading && (
@@ -363,66 +406,25 @@ export default function Gate3Route() {
         ))}
       </div>
 
-      <div className="border-t border-border px-8 py-4 space-y-3">
-        {stage === "failed" && failedStage === "exporting" && (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            <CircleAlert className="size-3.5 shrink-0" aria-hidden />
-            {projectQuery.data?.failed_reason ?? "The last export attempt failed."}
-          </div>
-        )}
-        {isExporting ? (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader className="size-4 animate-spin" aria-hidden />
-            Exporting…
-          </div>
-        ) : (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-1.5 text-sm">
-                <Checkbox
-                  checked={exportFormats.pdf}
-                  onCheckedChange={(checked) => setExportFormats((f) => ({ ...f, pdf: checked }))}
-                />
-                <Label>PDF</Label>
-              </label>
-              <label className="flex items-center gap-1.5 text-sm">
-                <Checkbox
-                  checked={exportFormats.epub}
-                  onCheckedChange={(checked) => setExportFormats((f) => ({ ...f, epub: checked }))}
-                />
-                <Label>EPUB</Label>
-              </label>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {outputs &&
-                Object.entries(outputs).map(([format, path]) => (
-                  <Button key={format} variant="outline" size="sm" onClick={() => revealItemInDir(path)}>
-                    <FolderOpen className="size-3.5" />
-                    Show {format.toUpperCase()}
-                  </Button>
-                ))}
-              {stage === "done" && !outputs && (
-                <Badge variant="outline" className="gap-1">
-                  <CheckCircle2 className="size-3.5" />
-                  Exported
-                </Badge>
-              )}
-              <Button
-                disabled={
-                  (!exportFormats.pdf && !exportFormats.epub) || exportMutation.isPending
-                }
-                onClick={() => {
-                  setOutputs(null);
-                  exportMutation.mutate();
-                }}
-              >
-                {exportMutation.isPending && <Loader className="size-4 animate-spin" aria-hidden />}
-                Export
-              </Button>
-            </div>
-          </div>
-        )}
+      <div className="border-t border-border px-8 py-4">
+        <ExportPanel
+          projectId={projectId!}
+          isExporting={isExporting}
+          percent={
+            isExporting && typeof event?.percent === "number" ? event.percent : null
+          }
+          outputs={outputs}
+          failedReason={
+            stage === "failed" && failedStage === "exporting"
+              ? projectQuery.data?.failed_reason ?? "The last export attempt failed."
+              : null
+          }
+          starting={exportMutation.isPending}
+          onExport={(request) => {
+            setOutputs(null);
+            exportMutation.mutate(request);
+          }}
+        />
       </div>
     </div>
   );

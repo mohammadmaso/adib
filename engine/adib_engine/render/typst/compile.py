@@ -8,13 +8,52 @@ where the project happens to live on disk.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from adib_engine.models.document import DocTree
 from adib_engine.models.preset import Preset
-from adib_engine.render.typst.document import tree_to_typst_body
+from adib_engine.render.typst.document import cover_page, tree_to_typst_body
 from adib_engine.render.typst.theme import build_theme
+
+
+class TypstNotFoundError(RuntimeError):
+    """No usable typst binary. The message is shown to the user verbatim."""
+
+
+def resolve_typst_bin(typst_bin: Path | str | None = None) -> str:
+    """Find a runnable typst, preferring the caller's explicit path.
+
+    Looked for in order: the path the shell passed us (its bundled sidecar), a
+    `typst` sitting next to this process' own executable (how Tauri lays out
+    `externalBin`, which also covers a frozen engine run outside the shell), and
+    finally PATH for a plain `uv run` dev setup.
+    """
+    if typst_bin:
+        candidate = Path(typst_bin)
+        # A bare name (the "typst" default) is a PATH lookup, not a file path.
+        if candidate.parent != Path("."):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        elif (found := shutil.which(str(typst_bin))) is not None:
+            return found
+
+    exe_name = "typst.exe" if sys.platform == "win32" else "typst"
+    sibling = Path(sys.executable).resolve().parent / exe_name
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+
+    if (found := shutil.which("typst")) is not None:
+        return found
+
+    raise TypstNotFoundError(
+        "PDF export needs the typst binary, which was not found. "
+        "Run ./scripts/prepare-binaries.sh to download the bundled copy, "
+        "or install typst and make sure it is on PATH."
+    )
 
 
 class TypstCompileError(RuntimeError):
@@ -31,8 +70,9 @@ def render_typst_source(
 ) -> str:
     """Build the full `.typ` document: theme preamble + body, from one tree."""
     theme = build_theme(preset.typography, target_lang=target_lang)
+    cover = cover_page(tree, assets_dir)
     body = tree_to_typst_body(tree, assets_dir)
-    return f"{theme}\n{body}\n"
+    return f"{theme}\n{cover}\n{body}\n" if cover else f"{theme}\n{body}\n"
 
 
 def compile_pdf(
@@ -58,7 +98,7 @@ def compile_pdf(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [str(typst_bin), "compile"]
+    cmd = [resolve_typst_bin(typst_bin), "compile"]
     if fonts_dir is not None:
         cmd += ["--font-path", str(fonts_dir)]
     cmd += [str(typ_path), str(out_path)]
@@ -73,4 +113,10 @@ def compile_pdf(
     return out_path
 
 
-__all__ = ["TypstCompileError", "compile_pdf", "render_typst_source"]
+__all__ = [
+    "TypstCompileError",
+    "TypstNotFoundError",
+    "compile_pdf",
+    "render_typst_source",
+    "resolve_typst_bin",
+]

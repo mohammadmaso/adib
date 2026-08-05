@@ -68,6 +68,13 @@ def compile_epub(
     for author in tree.meta.authors:
         book.add_author(author)
 
+    cover_asset = tree.assets.get(tree.meta.cover_asset_id or "")
+    cover_path = assets_dir / cover_asset.path if cover_asset else None
+    if cover_asset and cover_path and cover_path.exists():
+        # `set_cover` both sets the OPF cover metadata and adds the image item
+        # itself, so this asset is skipped in the generic asset loop below.
+        book.set_cover(f"assets/{cover_asset.path}", cover_path.read_bytes())
+
     fonts = _referenced_fonts(preset)
     css_text = build_css(preset.typography, target_lang=target_lang, font_files=fonts)
     css_item = epub.EpubItem(
@@ -91,6 +98,8 @@ def compile_epub(
             )
 
     for asset in tree.assets.values():
+        if cover_asset and asset.id == cover_asset.id:
+            continue
         src = assets_dir / asset.path
         if not src.exists():
             continue
@@ -104,7 +113,9 @@ def compile_epub(
         )
 
     chapters = split_into_chapters(tree)
-    spine: list = ["nav"]
+    # `set_cover`'s page (uid "cover") is non-linear by default, so a reader
+    # would skip it unless it's placed in the spine explicitly.
+    spine: list = (["cover"] if cover_asset else []) + ["nav"]
     toc: list = []
     for i, chapter in enumerate(chapters):
         body = chapter_to_xhtml_body(chapter, tree)

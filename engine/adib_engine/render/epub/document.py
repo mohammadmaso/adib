@@ -67,9 +67,19 @@ def _table_html(table: TableData) -> str:
     return f"<table>{caption}{''.join(rows_html)}</table>"
 
 
+def _image_style(node: DocNode) -> str:
+    """Keep the picture's original share of the page width, when ingest measured
+    one (PDF sources). Other sources get the reader's default full width."""
+    ratio = node.attrs.get("width_ratio")
+    if not isinstance(ratio, int | float) or not 0 < ratio <= 1:
+        return ""
+    return f' style="width:{round(ratio * 100, 1)}%"'
+
+
 def _figure_html(node: DocNode, tree: DocTree) -> str:
+    style = _image_style(node)
     images = [
-        f'<img src="{path}" alt="{ref.alt or ""}"/>'
+        f'<img src="{path}" alt="{ref.alt or ""}"{style}/>'
         for ref in node.assets
         if (path := _asset_path(tree, ref))
     ]

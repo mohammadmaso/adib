@@ -97,8 +97,58 @@ def cleanup_inline(text: str) -> str:
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
+# -- table-of-contents detection ----------------------------------------------
+#
+# Both renderers build their own navigational TOC from the tree's headings at
+# render time (see render.epub.compile / render.typst.document), so a TOC page
+# or chapter that survives from the *source* file is pure duplication: every
+# entry it lists already exists as a heading elsewhere in the tree. Importers
+# use the helpers below to recognize and drop that source-side TOC rather than
+# ingesting it as ordinary prose.
+
+#: Common "table of contents" page titles, casefolded. English-first since it's
+#: the overwhelmingly common source language, plus a few frequent others.
+_TOC_TITLES = {
+    "contents",
+    "table of contents",
+    "toc",
+    "فهرست",
+    "فهرست مطالب",
+    "table des matières",
+    "índice",
+    "indice",
+    "inhaltsverzeichnis",
+}
+
+#: One TOC entry: a label, a run of spaces/dot-leaders/tabs, then a trailing
+#: page number — "Chapter One .......... 12" or "Chapter One      12".
+_TOC_ENTRY_LINE = re.compile(r".{1,120}?[ \t.․·]{2,}\d{1,4}\s*$")
+
+
+def is_toc_title(text: str) -> bool:
+    """True when `text` is a heading that names a table of contents."""
+    return text.strip().strip(":").casefold() in _TOC_TITLES
+
+
+def looks_like_toc_lines(
+    lines: list[str], *, min_lines: int = 3, min_ratio: float = 0.6
+) -> bool:
+    """True when most non-empty lines look like TOC entries (label ... N).
+
+    Requires at least `min_lines` candidates so a short caption or a stray
+    numbered sentence can't trip it; a real contents page is a wall of them.
+    """
+    candidates = [ln.strip() for ln in lines if ln.strip()]
+    if len(candidates) < min_lines:
+        return False
+    hits = sum(1 for ln in candidates if _TOC_ENTRY_LINE.match(ln))
+    return hits / len(candidates) >= min_ratio
+
+
 __all__ = [
     "cleanup_inline",
+    "is_toc_title",
+    "looks_like_toc_lines",
     "make_asset_stager",
     "table_from_pipe",
 ]

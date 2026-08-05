@@ -204,6 +204,44 @@ def test_missing_asset_reference_does_not_crash_the_compile(tmp_path: Path):
     assert out.exists()
 
 
+def test_cover_asset_becomes_the_epub_cover(tmp_path: Path, assets_dir: Path):
+    tree = _tree_with_image()
+    tree.meta.cover_asset_id = "img1"
+
+    out = compile_epub(
+        tree,
+        _preset(),
+        target_lang="en",
+        assets_dir=assets_dir,
+        out_path=tmp_path / "book.epub",
+        fonts_dir=FONTS_DIR,
+    )
+    book = epub.read_epub(str(out))
+
+    assert book.get_item_with_id("cover") is not None
+    assert book.get_item_with_id("cover-img") is not None
+    zf = zipfile.ZipFile(out)
+    opf = next(n for n in zf.namelist() if n.endswith(".opf"))
+    assert 'name="cover"' in zf.read(opf).decode()
+
+    # The cover page leads the spine, ahead of "nav".
+    spine_ids = [ref[0] if isinstance(ref, tuple) else ref for ref in book.spine]
+    assert spine_ids[0] == "cover"
+
+
+def test_book_without_a_cover_asset_has_no_cover_item(tmp_path: Path, assets_dir: Path):
+    out = compile_epub(
+        _tree_with_image(),
+        _preset(),
+        target_lang="en",
+        assets_dir=assets_dir,
+        out_path=tmp_path / "book.epub",
+        fonts_dir=FONTS_DIR,
+    )
+    book = epub.read_epub(str(out))
+    assert book.get_item_with_id("cover") is None
+
+
 def test_table_renders_as_real_html_table(tmp_path: Path, assets_dir: Path):
     out = compile_epub(
         _tree_with_image(),

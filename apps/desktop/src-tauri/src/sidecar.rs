@@ -9,10 +9,12 @@
 //! attach to an engine you started yourself with `uv run adib-engine`, and no
 //! sidecar is spawned.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -75,6 +77,20 @@ fn generate_token() -> String {
     format!("{a:016x}{b:016x}")
 }
 
+/// Where Tauri puts an `externalBin` next to the app executable: `typst-<triple>`
+/// is copied in as plain `typst` (`typst.exe` on Windows), both in `tauri dev`
+/// and inside the bundled app.
+fn sidecar_path(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let path = exe.parent()?.join(name);
+    path.exists().then_some(path)
+}
+
 /// Spawn the engine and block until it reports its port.
 pub async fn start(app: &AppHandle) -> Result<EngineInfo, String> {
     if let Ok(base_url) = std::env::var("ADIB_ENGINE_URL") {
@@ -87,18 +103,38 @@ pub async fn start(app: &AppHandle) -> Result<EngineInfo, String> {
     }
 
     let token = generate_token();
+    let mut args: Vec<String> = vec![
+        "--port".into(),
+        "0".into(),
+        "--auth-token".into(),
+        token.clone(),
+        "--heartbeat-timeout".into(),
+        HEARTBEAT_TIMEOUT_SECS.into(),
+    ];
+
+    // The engine shells out to typst for PDF export. It cannot find the bundled
+    // sidecar on its own — without these it falls back to `typst` on PATH, which
+    // on a machine with no system typst makes every export fail.
+    match sidecar_path("typst") {
+        Some(path) => {
+            args.push("--typst-bin".into());
+            args.push(path.to_string_lossy().into_owned());
+        }
+        None => log::warn!("bundled typst sidecar not found; PDF export will need typst on PATH"),
+    }
+    match app.path().resolve("resources/fonts", BaseDirectory::Resource) {
+        Ok(dir) if dir.exists() => {
+            args.push("--fonts-dir".into());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+        _ => log::warn!("bundled fonts not found; PDF export falls back to system fonts"),
+    }
+
     let (mut rx, child) = app
         .shell()
         .sidecar("adib-engine")
         .map_err(|e| format!("adib-engine sidecar not found: {e}"))?
-        .args([
-            "--port",
-            "0",
-            "--auth-token",
-            &token,
-            "--heartbeat-timeout",
-            HEARTBEAT_TIMEOUT_SECS,
-        ])
+        .args(args)
         .spawn()
         .map_err(|e| format!("failed to spawn adib-engine: {e}"))?;
 
