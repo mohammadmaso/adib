@@ -269,6 +269,7 @@ export default function Gate1Route() {
         )}
         {tree && (
           <TreeNodeList
+            projectId={projectId}
             items={flatNodes}
             collapsed={collapsed}
             onToggleCollapse={toggleCollapse}

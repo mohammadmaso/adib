@@ -4,6 +4,7 @@ import type { FlatDocNode } from "@/lib/doc-tree";
 import { TreeNodeRow, type NodeAction } from "@/components/gate1/tree-node-row";
 
 interface TreeNodeListProps {
+  projectId: string | undefined;
   items: FlatDocNode[];
   collapsed: Set<string>;
   onToggleCollapse: (id: string) => void;
@@ -13,7 +14,7 @@ interface TreeNodeListProps {
 //  Large books can produce thousands of structure nodes; only the rows near
 //  the viewport are mounted, and collapsing a section removes its subtree
 //  from the flattened list entirely rather than just hiding it in the DOM.
-export function TreeNodeList({ items, collapsed, onToggleCollapse, onAction }: TreeNodeListProps) {
+export function TreeNodeList({ projectId, items, collapsed, onToggleCollapse, onAction }: TreeNodeListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const rowVirtualizer = useVirtualizer({
@@ -42,6 +43,7 @@ export function TreeNodeList({ items, collapsed, onToggleCollapse, onAction }: T
               }}
             >
               <TreeNodeRow
+                projectId={projectId}
                 node={item.node}
                 depth={item.depth}
                 hasChildren={item.hasChildren}

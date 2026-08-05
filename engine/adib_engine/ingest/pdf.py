@@ -56,6 +56,17 @@ MIN_IMAGE_PT = 24.0
 #: layouts, dense forms) and Docling's layout model should take over instead.
 MAX_COLUMNS_HEURISTIC = 3
 
+#: Substrings (casefolded) of font names that indicate a monospace typeface —
+#: the strongest signal a text block is code rather than prose, since authors
+#: overwhelmingly typeset code blocks in a dedicated monospace font.
+_MONOSPACE_FONT_HINTS = ("mono", "courier", "consolas", "menlo", "typewriter")
+
+#: Share of a block's characters that must sit in a monospace font, and the
+#: minimum line count, before it's trusted as code rather than prose that
+#: happens to use a monospace face for a word or two.
+MIN_MONOSPACE_RATIO = 0.9
+MIN_CODE_LINES = 2
+
 
 @dataclass
 class ProbeResult:
@@ -319,6 +330,22 @@ def _ingest_page(
             continue
         page_lines.extend(_block_text_lines(block))
 
+        if _looks_like_code(block):
+            code_text = _block_code_text(block)
+            page_items.append(
+                (
+                    bbox.y0,
+                    bbox.x0,
+                    DocNode(
+                        id=make_node_id(NodeKind.CODE, code_text, len(nodes) + len(page_items)),
+                        kind=NodeKind.CODE,
+                        text=code_text,
+                        source=span(bbox),
+                    ),
+                )
+            )
+            continue
+
         level = _heading_level_for(block_text, heading_hits, dominant_size, font_levels)
         kind = NodeKind.HEADING if level else NodeKind.PARAGRAPH
         page_items.append(
@@ -354,6 +381,37 @@ def _block_text_and_size(block: dict) -> tuple[str, float]:
     text = " ".join(parts)
     dominant = sizes.most_common(1)[0][0] if sizes else 0.0
     return text, dominant
+
+
+def _looks_like_code(block: dict) -> bool:
+    """True when a text block is set almost entirely in a monospace font.
+
+    Font family is a much stronger signal than anything shape-based (unlike
+    plain text, a PDF block already carries the typeface the author chose),
+    so this only needs two guards: enough lines that it isn't a single
+    monospaced word or figure label, and a high monospace character ratio so
+    a stray inline `code` span in an otherwise prose block doesn't trip it.
+    """
+    if len(block["lines"]) < MIN_CODE_LINES:
+        return False
+    total = 0
+    mono = 0
+    for line in block["lines"]:
+        for sp in line["spans"]:
+            length = len(sp["text"])
+            total += length
+            font = sp.get("font", "").casefold()
+            if length and any(hint in font for hint in _MONOSPACE_FONT_HINTS):
+                mono += length
+    return total > 0 and mono / total >= MIN_MONOSPACE_RATIO
+
+
+def _block_code_text(block: dict) -> str:
+    """Join a code block's lines preserving line breaks and indentation,
+    unlike `_block_text_and_size` which flattens everything into prose.
+    """
+    lines = ["".join(sp["text"] for sp in line["spans"]).rstrip() for line in block["lines"]]
+    return "\n".join(lines).strip("\n")
 
 
 def _heading_level_for(

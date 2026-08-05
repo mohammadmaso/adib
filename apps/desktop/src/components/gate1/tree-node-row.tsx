@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NODE_KINDS, type DocNode } from "@/lib/doc-tree";
+import { useAssetImage } from "@/lib/asset-image";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -50,6 +51,7 @@ export type NodeAction =
   | { type: "split"; index: number };
 
 export interface TreeNodeRowProps {
+  projectId: string | undefined;
   node: DocNode;
   depth: number;
   hasChildren: boolean;
@@ -66,6 +68,7 @@ export interface TreeNodeRowProps {
 }
 
 export function TreeNodeRow({
+  projectId,
   node,
   depth,
   hasChildren,
@@ -75,6 +78,8 @@ export function TreeNodeRow({
   onAction,
 }: TreeNodeRowProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const firstAssetId = node.kind === "figure" ? node.assets?.[0]?.asset_id : undefined;
+  const imageUrl = useAssetImage(projectId, firstAssetId);
 
   return (
     <div>
@@ -234,11 +239,27 @@ export function TreeNodeRow({
             </div>
           </div>
 
+          {node.kind === "figure" &&
+            (imageUrl ? (
+              <img
+                src={imageUrl}
+                alt={node.assets?.[0]?.alt ?? ""}
+                className="max-h-48 max-w-full rounded border object-contain"
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground italic">
+                {firstAssetId ? "loading image…" : "figure (no asset)"}
+              </p>
+            ))}
+
           {node.text != null ? (
             <Textarea
               ref={textareaRef}
               defaultValue={node.text}
-              className="min-h-8 py-1 text-sm"
+              className={cn(
+                "min-h-8 py-1 text-sm",
+                node.kind === "code" && "font-mono whitespace-pre",
+              )}
               onBlur={(e) => {
                 if (e.target.value !== node.text) {
                   onAction(node.id, { type: "patch", patch: { text: e.target.value } });
@@ -246,9 +267,11 @@ export function TreeNodeRow({
               }}
             />
           ) : (
-            <p className="text-xs text-muted-foreground italic">
-              {node.kind === "table" ? "table content" : node.kind === "figure" ? "figure" : "(no text)"}
-            </p>
+            node.kind !== "figure" && (
+              <p className="text-xs text-muted-foreground italic">
+                {node.kind === "table" ? "table content" : "(no text)"}
+              </p>
+            )
           )}
         </div>
       </div>

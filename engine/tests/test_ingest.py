@@ -220,6 +220,80 @@ def test_epub_cover_item_becomes_the_cover_asset(tmp_path: Path):
     assert (tmp_path / "assets" / cover.path).exists()
 
 
+def test_txt_infers_code_lists_and_quotes(tmp_path: Path):
+    from adib_engine.ingest.txt import ingest_txt
+
+    path = tmp_path / "book.txt"
+    path.write_text(
+        """Introduction
+
+Networks move bytes between machines that will never meet.
+
+    def handshake():
+        return "syn-ack"
+
+- one
+- two
+
+> a remark worth setting apart
+
+Not a list - just a sentence with a dash in it.
+""",
+        encoding="utf-8",
+    )
+
+    tree = ingest_txt(path)
+    kinds = [n.kind for n in tree.walk()]
+    assert kinds == [
+        NodeKind.HEADING,
+        NodeKind.PARAGRAPH,
+        NodeKind.CODE,
+        NodeKind.LIST,
+        NodeKind.LIST_ITEM,
+        NodeKind.LIST_ITEM,
+        NodeKind.QUOTE,
+        NodeKind.PARAGRAPH,
+    ]
+
+    code = next(n for n in tree.walk() if n.kind is NodeKind.CODE)
+    assert code.text == 'def handshake():\n    return "syn-ack"'
+
+    quote = next(n for n in tree.walk() if n.kind is NodeKind.QUOTE)
+    assert quote.text == "a remark worth setting apart"
+
+    # A single indented line, or a lone leading dash, is too ambiguous with
+    # ordinary prose to trust — both must fall back to a ordinary paragraph.
+    paragraphs = [n for n in tree.walk() if n.kind is NodeKind.PARAGRAPH]
+    assert paragraphs[-1].text == "Not a list - just a sentence with a dash in it."
+
+
+def test_pdf_detects_a_monospace_code_block(tmp_path: Path):
+    import pymupdf
+
+    from adib_engine.ingest.pdf import ingest_pdf
+
+    path = tmp_path / "book.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Introduction", fontsize=24)
+    page.insert_text((72, 110), "Some prose above the snippet.", fontsize=11)
+    page.insert_textbox(
+        pymupdf.Rect(72, 140, 300, 200),
+        'def handshake():\n    return "syn-ack"',
+        fontsize=11,
+        fontname="Courier",
+    )
+    doc.save(str(path))
+    doc.close()
+
+    tree = ingest_pdf(path, assets_dir=tmp_path / "assets")
+    kinds = [n.kind for n in tree.walk()]
+    assert NodeKind.CODE in kinds
+    code = next(n for n in tree.walk() if n.kind is NodeKind.CODE)
+    assert "def handshake():" in code.text
+    assert 'return "syn-ack"' in code.text
+
+
 def test_pdf_probe_flags_a_scanned_document(tmp_path: Path):
     from adib_engine.ingest.pdf import probe_pdf
 
