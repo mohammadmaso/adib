@@ -164,3 +164,57 @@ export function splitNode(nodes: DocNode[], id: string, splitAt: number): DocNod
 export function countNodes(nodes: DocNode[]): number {
   return nodes.reduce((sum, n) => sum + 1 + countNodes(children(n)), 0);
 }
+
+export interface FlatDocNode {
+  node: DocNode;
+  depth: number;
+  hasChildren: boolean;
+  can: {
+    moveUp: boolean;
+    moveDown: boolean;
+    indent: boolean;
+    outdent: boolean;
+    mergeNext: boolean;
+  };
+}
+
+/**
+ * Flattens the tree into the currently-visible rows (depth-first, skipping the
+ * children of collapsed nodes) so callers can window-render a large document
+ * instead of mounting every node up front.
+ */
+export function flattenVisible(
+  nodes: DocNode[],
+  collapsed: Set<string>,
+  depth = 0,
+): FlatDocNode[] {
+  const out: FlatDocNode[] = [];
+  nodes.forEach((node, i) => {
+    const kids = children(node);
+    out.push({
+      node,
+      depth,
+      hasChildren: kids.length > 0,
+      can:
+        depth === 0
+          ? {
+              moveUp: i > 0,
+              moveDown: i < nodes.length - 1,
+              indent: canIndent(nodes, node.id),
+              outdent: false,
+              mergeNext: canMergeNext(nodes, node.id),
+            }
+          : {
+              moveUp: i > 0,
+              moveDown: i < nodes.length - 1,
+              indent: i > 0,
+              outdent: true,
+              mergeNext: i < nodes.length - 1,
+            },
+    });
+    if (kids.length > 0 && !collapsed.has(node.id)) {
+      out.push(...flattenVisible(kids, collapsed, depth + 1));
+    }
+  });
+  return out;
+}

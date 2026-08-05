@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -49,9 +49,12 @@ export type NodeAction =
   | { type: "outdent" }
   | { type: "split"; index: number };
 
-interface TreeNodeRowProps {
+export interface TreeNodeRowProps {
   node: DocNode;
   depth: number;
+  hasChildren: boolean;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
   can: {
     moveUp: boolean;
     moveDown: boolean;
@@ -62,11 +65,16 @@ interface TreeNodeRowProps {
   onAction: (id: string, action: NodeAction) => void;
 }
 
-export function TreeNodeRow({ node, depth, can, onAction }: TreeNodeRowProps) {
-  const [collapsed, setCollapsed] = useState(false);
+export function TreeNodeRow({
+  node,
+  depth,
+  hasChildren,
+  collapsed,
+  onToggleCollapse,
+  can,
+  onAction,
+}: TreeNodeRowProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const kids = node.children ?? [];
-  const hasKids = kids.length > 0;
 
   return (
     <div>
@@ -78,9 +86,9 @@ export function TreeNodeRow({ node, depth, can, onAction }: TreeNodeRowProps) {
           type="button"
           className={cn(
             "mt-1 flex size-4 shrink-0 items-center justify-center text-muted-foreground",
-            !hasKids && "invisible",
+            !hasChildren && "invisible",
           )}
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={onToggleCollapse}
           aria-label={collapsed ? "Expand" : "Collapse"}
         >
           {collapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
@@ -244,26 +252,6 @@ export function TreeNodeRow({ node, depth, can, onAction }: TreeNodeRowProps) {
           )}
         </div>
       </div>
-
-      {hasKids && !collapsed && (
-        <div>
-          {kids.map((child, i) => (
-            <TreeNodeRow
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              can={{
-                moveUp: i > 0,
-                moveDown: i < kids.length - 1,
-                indent: i > 0,
-                outdent: true,
-                mergeNext: i < kids.length - 1,
-              }}
-              onAction={onAction}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

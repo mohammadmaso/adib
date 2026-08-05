@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, Loader, Pause, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { api, type components } from "@/lib/api-client";
 import { getApiKey } from "@/lib/keychain";
 import { useProjectEvents } from "@/hooks/use-project-events";
-import { SegmentRow } from "@/components/gate3/segment-row";
+import { SegmentList } from "@/components/gate3/segment-list";
 import { ExportPanel } from "@/components/gate3/export-panel";
 import { CoverPanel, CoverTranslateFailedNotice } from "@/components/gate3/cover-panel";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 
 type SegmentStatus = components["schemas"]["SegmentStatus"];
+
+const SEGMENTS_PAGE_SIZE = 60;
 
 const FILTERS: { label: string; value: SegmentStatus | "all" }[] = [
   { label: "All", value: "all" },
@@ -76,19 +78,26 @@ export default function Gate3Route() {
     },
   });
 
-  const segmentsQuery = useQuery({
+  const segmentsQuery = useInfiniteQuery({
     queryKey: ["segments", projectId, filter],
     enabled: !!projectId && hasSegments,
-    queryFn: async () => {
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
       const { data, error } = await api.GET("/projects/{project_id}/segments", {
         params: {
           path: { project_id: projectId! },
-          query: { status: filter === "all" ? undefined : filter, limit: 300, offset: 0 },
+          query: {
+            status: filter === "all" ? undefined : filter,
+            limit: SEGMENTS_PAGE_SIZE,
+            offset: pageParam,
+          },
         },
       });
       if (error) throw error;
       return data;
     },
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length < SEGMENTS_PAGE_SIZE ? undefined : allPages.length * SEGMENTS_PAGE_SIZE,
   });
 
   const translateMutation = useMutation({
@@ -296,7 +305,7 @@ export default function Gate3Route() {
     );
   }
 
-  const segments = segmentsQuery.data ?? [];
+  const segments = segmentsQuery.data?.pages.flat() ?? [];
   const counts = countsQuery.data ?? {};
   const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
 
@@ -377,34 +386,25 @@ export default function Gate3Route() {
         onTranslatingChange={setCoverTranslating}
       />
 
-      <div className="flex-1 overflow-y-auto">
-        {segmentsQuery.isLoading && (
-          <div className="grid h-32 place-items-center">
-            <Loader className="size-5 animate-spin text-muted-foreground" aria-hidden />
-          </div>
-        )}
-        {segments.length === 0 && !segmentsQuery.isLoading && (
-          <p className="p-8 text-center text-sm text-muted-foreground">No segments match this filter.</p>
-        )}
-        {segments.map((segment) => (
-          <SegmentRow
-            key={segment.id}
-            segment={segment}
-            retranslating={retranslating.has(segment.id)}
-            onSave={(target_text) => saveMutation.mutate({ id: segment.id, patch: { target_text } })}
-            onToggleLock={() =>
-              saveMutation.mutate({ id: segment.id, patch: { locked: !segment.locked } })
-            }
-            onApprove={() =>
-              saveMutation.mutate({
-                id: segment.id,
-                patch: { status: segment.status === "approved" ? "translated" : "approved" },
-              })
-            }
-            onRetranslate={() => retranslateMutation.mutate(segment.id)}
-          />
-        ))}
-      </div>
+      <SegmentList
+        segments={segments}
+        isLoading={segmentsQuery.isLoading}
+        hasNextPage={segmentsQuery.hasNextPage}
+        isFetchingNextPage={segmentsQuery.isFetchingNextPage}
+        fetchNextPage={segmentsQuery.fetchNextPage}
+        retranslating={retranslating}
+        onSave={(id, target_text) => saveMutation.mutate({ id, patch: { target_text } })}
+        onToggleLock={(segment) =>
+          saveMutation.mutate({ id: segment.id, patch: { locked: !segment.locked } })
+        }
+        onApprove={(segment) =>
+          saveMutation.mutate({
+            id: segment.id,
+            patch: { status: segment.status === "approved" ? "translated" : "approved" },
+          })
+        }
+        onRetranslate={(id) => retranslateMutation.mutate(id)}
+      />
 
       <div className="border-t border-border px-8 py-4">
         <ExportPanel

@@ -1,14 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, Loader } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
 import {
-  canIndent,
-  canMergeNext,
   countNodes,
   deleteNode,
+  flattenVisible,
   indentNode,
   mergeWithNext,
   moveNode,
@@ -17,7 +16,8 @@ import {
   updateNode,
   type DocTree,
 } from "@/lib/doc-tree";
-import { TreeNodeRow, type NodeAction } from "@/components/gate1/tree-node-row";
+import { TreeNodeList } from "@/components/gate1/tree-node-list";
+import type { NodeAction } from "@/components/gate1/tree-node-row";
 import { useProjectEvents } from "@/hooks/use-project-events";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +48,7 @@ export default function Gate1Route() {
   const queryClient = useQueryClient();
   const [tree, setTree] = useState<DocTree | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -151,6 +152,21 @@ export default function Gate1Route() {
     setDirty(true);
   }
 
+  function toggleCollapse(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const nodesForFlatten = tree?.nodes ?? [];
+  const flatNodes = useMemo(
+    () => flattenVisible(nodesForFlatten, collapsed),
+    [nodesForFlatten, collapsed],
+  );
+
   if (projectQuery.isLoading) {
     return (
       <div className="grid h-full place-items-center">
@@ -245,28 +261,20 @@ export default function Gate1Route() {
         </div>
       </div>
 
-      <div className={`flex-1 overflow-y-auto px-6 py-4 ${readOnly ? "pointer-events-none opacity-70" : ""}`}>
+      <div className={`flex-1 overflow-hidden ${readOnly ? "pointer-events-none opacity-70" : ""}`}>
         {treeQuery.isLoading && !tree && (
           <div className="grid h-full place-items-center">
             <Loader className="size-6 animate-spin text-muted-foreground" aria-hidden />
           </div>
         )}
-        {tree &&
-          nodes.map((node, i) => (
-            <TreeNodeRow
-              key={node.id}
-              node={node}
-              depth={0}
-              can={{
-                moveUp: i > 0,
-                moveDown: i < nodes.length - 1,
-                indent: canIndent(nodes, node.id),
-                outdent: false,
-                mergeNext: canMergeNext(nodes, node.id),
-              }}
-              onAction={dispatch}
-            />
-          ))}
+        {tree && (
+          <TreeNodeList
+            items={flatNodes}
+            collapsed={collapsed}
+            onToggleCollapse={toggleCollapse}
+            onAction={dispatch}
+          />
+        )}
       </div>
     </div>
   );
